@@ -182,3 +182,72 @@ class BalancedAnchorBatchSampler(BatchSampler):
             yield batch
 
     def __len__(self): return self.n_batches
+
+
+def _dl_kwargs():
+    numw = int(getattr(config, "NUM_WORKERS", 0))
+    kw = dict(num_workers=numw, pin_memory=True)
+    if numw > 0:
+        kw["persistent_workers"] = False
+        kw["prefetch_factor"] = 2
+    return kw
+
+def make_loaders():
+    df = _read_metadata(config.META_CSV)
+
+    if not getattr(config, "FAST_DEBUG", False):
+        stems = set()
+        for pat in ("*.jpg","*.png","*.jpeg"):
+            stems |= {os.path.splitext(os.path.basename(p))[0]
+                      for p in glob.glob(os.path.join(config.IMAGES_DIR, pat))}
+        before = len(df)
+        df = df[df["isic_id"].isin(stems)].reset_index(drop=True)
+        print(f"[data] filtered by listing: {len(df)}/{before} keep")
+    else:
+        print("[data] FAST_DEBUG on: skipping full directory listing.")
+
+    if config.USE_PATIENT_SPLIT and "patient_id" in df.columns:
+        train_df, val_df, test_df = _grouped_split(df, "patient_id", config.VAL_FRACTION, config.TEST_FRACTION, config.SEED)
+    else:
+        train_df, val_df, test_df = _stratified_split(df, config.VAL_FRACTION, config.TEST_FRACTION, config.SEED)
+
+    train_ds = ISICSingle(config.IMAGES_DIR, train_df, train=True)
+    val_ds   = ISICSingle(config.IMAGES_DIR, val_df,   train=False)
+    test_ds  = ISICSingle(config.IMAGES_DIR, test_df,  train=False)
+
+    dlkw = _dl_kwargs()
+    train_loader = DataLoader(train_ds, batch_size=config.BATCH_SIZE, shuffle=True,  **dlkw)
+    val_loader   = DataLoader(val_ds,   batch_size=config.BATCH_SIZE, shuffle=False, **dlkw)
+    test_loader  = DataLoader(test_ds,  batch_size=config.BATCH_SIZE, shuffle=False, **dlkw)
+    return train_loader, val_loader, test_loader, (train_df, val_df, test_df)
+
+def make_triplet_loaders_from_splits(train_df, val_df):
+    train_tri = ISICTriplet(config.IMAGES_DIR, train_df, train=True)
+    val_tri   = ISICTriplet(config.IMAGES_DIR, val_df,   train=False)
+
+    dlkw = _dl_kwargs()
+    tr_loader = DataLoader(
+        train_tri,
+        batch_sampler=BalancedAnchorBatchSampler(
+            train_tri,
+            batch_size=config.BATCH_SIZE,
+            seed=config.SEED,
+            steps_per_epoch=getattr(config, "TRIPLET_STEPS_TRAIN", None),
+        ),
+        **dlkw
+    )
+
+    n0 = len(val_tri.class_to_indices[0]); n1 = len(val_tri.class_to_indices[1])
+    minority = max(1, min(n0, n1))
+    val_bs = max(2, min(config.BATCH_SIZE, 2 * min(minority, 32)))
+    va_loader = DataLoader(
+        val_tri,
+        batch_sampler=BalancedAnchorBatchSampler(
+            val_tri,
+            batch_size=val_bs,
+            seed=config.SEED,
+            steps_per_epoch=getattr(config, "TRIPLET_STEPS_VAL", None),
+        ),
+        **dlkw
+    )
+    return tr_loader, va_loader
