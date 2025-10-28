@@ -1,4 +1,6 @@
-import os, random, glob
+import os
+import random
+import glob
 from typing import Optional, List, Dict
 from collections import defaultdict
 
@@ -11,6 +13,8 @@ from torchvision.transforms import v2
 import config
 
 # ---------- transforms ----------
+
+
 def _build_transforms(train: bool) -> v2.Compose:
     if getattr(config, "FAST_DEBUG", False):
         aug = [
@@ -24,50 +28,70 @@ def _build_transforms(train: bool) -> v2.Compose:
             v2.RandomVerticalFlip(p=0.2),
             v2.RandomRotation(12),
             v2.ColorJitter(0.15, 0.15, 0.10, 0.05),
-            v2.RandomResizedCrop((config.IMAGE_SIZE, config.IMAGE_SIZE), scale=(0.85, 1.0)),
+            v2.RandomResizedCrop(
+                (config.IMAGE_SIZE, config.IMAGE_SIZE), scale=(0.85, 1.0)),
         ]
     common = [
         v2.ToImage(),
         v2.Resize((config.IMAGE_SIZE, config.IMAGE_SIZE), antialias=True),
         v2.ToDtype(torch.float32, scale=True),
-        v2.Normalize(mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225]),
+        v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ]
     return v2.Compose((aug if train else []) + common)
 
-_EXTS = (".jpg",".jpeg",".png",".JPG",".JPEG",".PNG")
+
+_EXTS = (".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG")
+
+
 def _resolve_path(images_dir: str, stem: str) -> Optional[str]:
     if getattr(config, "ASSUME_JPG", True):
         p = os.path.join(images_dir, stem + ".jpg")
-        if os.path.exists(p): return p
+        if os.path.exists(p):
+            return p
     for ext in _EXTS:
         p = os.path.join(images_dir, stem + ext)
-        if os.path.exists(p): return p
+        if os.path.exists(p):
+            return p
     return None
 
 # ---------- metadata & split ----------
+
+
 def _read_metadata(csv_path: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
     if "isic_id" not in df.columns and "image_name" in df.columns:
-        df = df.rename(columns={"image_name":"isic_id"})
+        df = df.rename(columns={"image_name": "isic_id"})
     assert "isic_id" in df.columns and "target" in df.columns
-    keep = ["isic_id","target"] + (["patient_id"] if "patient_id" in df.columns else [])
-    df = df[keep].dropna(subset=["isic_id","target"]).reset_index(drop=True)
+    keep = ["isic_id", "target"] + \
+        (["patient_id"] if "patient_id" in df.columns else [])
+    df = df[keep].dropna(subset=["isic_id", "target"]).reset_index(drop=True)
     df["isic_id"] = df["isic_id"].astype(str)
-    df["target"]  = df["target"].astype(int)
+    df["target"] = df["target"].astype(int)
     return df
+
 
 def _stratified_split(df, val_frac, test_frac, seed):
     rng = random.Random(seed)
     parts = []
     for _, g in df.groupby("target"):
-        idxs = list(g.index); rng.shuffle(idxs)
-        n = len(idxs); n_test = int(round(test_frac*n)); n_val = int(round(val_frac*n))
-        test_idx = idxs[:n_test]; val_idx = idxs[n_test:n_test+n_val]; train_idx = idxs[n_test+n_val:]
-        parts += [("train", g.loc[train_idx]), ("val", g.loc[val_idx]), ("test", g.loc[test_idx])]
-    train = pd.concat([p for k,p in parts if k=="train"]).sample(frac=1, random_state=seed)
-    val   = pd.concat([p for k,p in parts if k=="val"]).sample(frac=1, random_state=seed)
-    test  = pd.concat([p for k,p in parts if k=="test"]).sample(frac=1, random_state=seed)
+        idxs = list(g.index)
+        rng.shuffle(idxs)
+        n = len(idxs)
+        n_test = int(round(test_frac*n))
+        n_val = int(round(val_frac*n))
+        test_idx = idxs[:n_test]
+        val_idx = idxs[n_test:n_test+n_val]
+        train_idx = idxs[n_test+n_val:]
+        parts += [("train", g.loc[train_idx]),
+                  ("val", g.loc[val_idx]), ("test", g.loc[test_idx])]
+    train = pd.concat([p for k, p in parts if k == "train"]
+                      ).sample(frac=1, random_state=seed)
+    val = pd.concat([p for k, p in parts if k == "val"]
+                    ).sample(frac=1, random_state=seed)
+    test = pd.concat([p for k, p in parts if k == "test"]
+                     ).sample(frac=1, random_state=seed)
     return train.reset_index(drop=True), val.reset_index(drop=True), test.reset_index(drop=True)
+
 
 def _grouped_split(df, group_col, val_frac, test_frac, seed):
     rng = random.Random(seed)
@@ -75,15 +99,22 @@ def _grouped_split(df, group_col, val_frac, test_frac, seed):
     for _, g in df.groupby("target"):
         groups = list(g[group_col].dropna().astype(str).unique())
         rng.shuffle(groups)
-        n = len(groups); n_test = int(round(test_frac*n)); n_val = int(round(val_frac*n))
-        test_g = set(groups[:n_test]); val_g = set(groups[n_test:n_test+n_val]); train_g = set(groups[n_test+n_val:])
+        n = len(groups)
+        n_test = int(round(test_frac*n))
+        n_val = int(round(val_frac*n))
+        test_g = set(groups[:n_test])
+        val_g = set(groups[n_test:n_test+n_val])
+        train_g = set(groups[n_test+n_val:])
         train = g[g[group_col].astype(str).isin(train_g)]
-        val   = g[g[group_col].astype(str).isin(val_g)]
-        test  = g[g[group_col].astype(str).isin(test_g)]
+        val = g[g[group_col].astype(str).isin(val_g)]
+        test = g[g[group_col].astype(str).isin(test_g)]
         parts += [("train", train), ("val", val), ("test", test)]
-    train = pd.concat([p for k,p in parts if k=="train"]).sample(frac=1, random_state=seed)
-    val   = pd.concat([p for k,p in parts if k=="val"]).sample(frac=1, random_state=seed)
-    test  = pd.concat([p for k,p in parts if k=="test"]).sample(frac=1, random_state=seed)
+    train = pd.concat([p for k, p in parts if k == "train"]
+                      ).sample(frac=1, random_state=seed)
+    val = pd.concat([p for k, p in parts if k == "val"]
+                    ).sample(frac=1, random_state=seed)
+    test = pd.concat([p for k, p in parts if k == "test"]
+                     ).sample(frac=1, random_state=seed)
     return train.reset_index(drop=True), val.reset_index(drop=True), test.reset_index(drop=True)
 
 
@@ -98,13 +129,15 @@ class ISICSingle(Dataset):
             frames = []
             for _, g in table.groupby("target"):
                 frames.append(g.sample(n=min(lim, len(g)), random_state=seed))
-            table = pd.concat(frames, axis=0).sample(frac=1, random_state=seed).reset_index(drop=True)
+            table = pd.concat(frames, axis=0).sample(
+                frac=1, random_state=seed).reset_index(drop=True)
         keep = []
         for _, r in table.iterrows():
             p = _resolve_path(images_dir, str(r["isic_id"]))
-            if p: keep.append((p, int(r["target"])))
-        self.paths  = [p for p,_ in keep]
-        self.labels = [y for _,y in keep]
+            if p:
+                keep.append((p, int(r["target"])))
+        self.paths = [p for p, _ in keep]
+        self.labels = [y for _, y in keep]
 
     def __len__(self): return len(self.paths)
 
@@ -117,6 +150,7 @@ class ISICSingle(Dataset):
 
 class ISICTriplet(Dataset):
     """Returns (anchor, positive, negative, label_of_anchor)."""
+
     def __init__(self, images_dir: str, table: pd.DataFrame, train: bool):
         seed = getattr(config, "SEED", 42)
         lim = int(getattr(config, "FAST_LIMIT_PER_CLASS", 0))
@@ -124,15 +158,17 @@ class ISICTriplet(Dataset):
             frames = []
             for _, g in table.groupby("target"):
                 frames.append(g.sample(n=min(lim, len(g)), random_state=seed))
-            table = pd.concat(frames, axis=0).sample(frac=1, random_state=seed).reset_index(drop=True)
+            table = pd.concat(frames, axis=0).sample(
+                frac=1, random_state=seed).reset_index(drop=True)
 
         self.dir = images_dir
         self.tfm = _build_transforms(train)
-        self.records: List[tuple[str,int]] = []
+        self.records: List[tuple[str, int]] = []
         self.class_to_indices: Dict[int, List[int]] = defaultdict(list)
         for _, r in table.iterrows():
             p = _resolve_path(images_dir, str(r["isic_id"]))
-            if not p: continue
+            if not p:
+                continue
             y = int(r["target"])
             self.class_to_indices[y].append(len(self.records))
             self.records.append((p, y))
@@ -157,8 +193,10 @@ class ISICTriplet(Dataset):
         xn, _ = self._load(neg_idx)
         return xa, xp, xn, torch.tensor(ya, dtype=torch.long)
 
+
 class BalancedAnchorBatchSampler(BatchSampler):
     """Balanced anchors per class; with-replacement; steps_per_epoch controls runtime."""
+
     def __init__(self, dataset: ISICTriplet, batch_size: int, seed: int = 42, steps_per_epoch: int | None = None):
         self.dataset = dataset
         self.bs = max(2, int(batch_size))
@@ -192,12 +230,13 @@ def _dl_kwargs():
         kw["prefetch_factor"] = 2
     return kw
 
+
 def make_loaders():
     df = _read_metadata(config.META_CSV)
 
     if not getattr(config, "FAST_DEBUG", False):
         stems = set()
-        for pat in ("*.jpg","*.png","*.jpeg"):
+        for pat in ("*.jpg", "*.png", "*.jpeg"):
             stems |= {os.path.splitext(os.path.basename(p))[0]
                       for p in glob.glob(os.path.join(config.IMAGES_DIR, pat))}
         before = len(df)
@@ -207,23 +246,29 @@ def make_loaders():
         print("[data] FAST_DEBUG on: skipping full directory listing.")
 
     if config.USE_PATIENT_SPLIT and "patient_id" in df.columns:
-        train_df, val_df, test_df = _grouped_split(df, "patient_id", config.VAL_FRACTION, config.TEST_FRACTION, config.SEED)
+        train_df, val_df, test_df = _grouped_split(
+            df, "patient_id", config.VAL_FRACTION, config.TEST_FRACTION, config.SEED)
     else:
-        train_df, val_df, test_df = _stratified_split(df, config.VAL_FRACTION, config.TEST_FRACTION, config.SEED)
+        train_df, val_df, test_df = _stratified_split(
+            df, config.VAL_FRACTION, config.TEST_FRACTION, config.SEED)
 
     train_ds = ISICSingle(config.IMAGES_DIR, train_df, train=True)
-    val_ds   = ISICSingle(config.IMAGES_DIR, val_df,   train=False)
-    test_ds  = ISICSingle(config.IMAGES_DIR, test_df,  train=False)
+    val_ds = ISICSingle(config.IMAGES_DIR, val_df,   train=False)
+    test_ds = ISICSingle(config.IMAGES_DIR, test_df,  train=False)
 
     dlkw = _dl_kwargs()
-    train_loader = DataLoader(train_ds, batch_size=config.BATCH_SIZE, shuffle=True,  **dlkw)
-    val_loader   = DataLoader(val_ds,   batch_size=config.BATCH_SIZE, shuffle=False, **dlkw)
-    test_loader  = DataLoader(test_ds,  batch_size=config.BATCH_SIZE, shuffle=False, **dlkw)
+    train_loader = DataLoader(
+        train_ds, batch_size=config.BATCH_SIZE, shuffle=True,  **dlkw)
+    val_loader = DataLoader(
+        val_ds,   batch_size=config.BATCH_SIZE, shuffle=False, **dlkw)
+    test_loader = DataLoader(
+        test_ds,  batch_size=config.BATCH_SIZE, shuffle=False, **dlkw)
     return train_loader, val_loader, test_loader, (train_df, val_df, test_df)
+
 
 def make_triplet_loaders_from_splits(train_df, val_df):
     train_tri = ISICTriplet(config.IMAGES_DIR, train_df, train=True)
-    val_tri   = ISICTriplet(config.IMAGES_DIR, val_df,   train=False)
+    val_tri = ISICTriplet(config.IMAGES_DIR, val_df,   train=False)
 
     dlkw = _dl_kwargs()
     tr_loader = DataLoader(
@@ -237,7 +282,8 @@ def make_triplet_loaders_from_splits(train_df, val_df):
         **dlkw
     )
 
-    n0 = len(val_tri.class_to_indices[0]); n1 = len(val_tri.class_to_indices[1])
+    n0 = len(val_tri.class_to_indices[0])
+    n1 = len(val_tri.class_to_indices[1])
     minority = max(1, min(n0, n1))
     val_bs = max(2, min(config.BATCH_SIZE, 2 * min(minority, 32)))
     va_loader = DataLoader(
