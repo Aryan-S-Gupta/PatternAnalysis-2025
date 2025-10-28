@@ -32,3 +32,21 @@ LR_SIAMESE = 1e-4
 WEIGHT_DECAY = 1e-4
 BETAS = (0.9, 0.999)
 MAX_NORM = 1.0   # grad clip
+
+# Save/plots
+SAVE_PLOTS  = True
+SAVE_MODELS = True
+
+# Split hygiene
+USE_PATIENT_SPLIT = True
+
+# Fast-start / debugging knobs
+FAST_DEBUG = True                 # False for full run
+FAST_LIMIT_PER_CLASS = 1200       # cap per class if FAST_DEBUG
+
+TRIPLET_STEPS_TRAIN = 80          # steps/epoch Stage-1 (train)
+TRIPLET_STEPS_VAL   = 20          # steps/epoch Stage-1 (val)
+ASSUME_JPG = True                 # quick path resolve
+
+# Plot smoothing
+SMOOTH_K = 3                      # moving-average window for training_plots
