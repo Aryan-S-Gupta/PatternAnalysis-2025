@@ -11,8 +11,8 @@ import config
 from data import make_loaders, make_triplet_loaders_from_splits
 from modules import SiameseTriplet, HeadBinaryClassifier
 from utils import (
-    set_seed, plot_curves, accuracy, plot_tsne, plot_confusion_matrix,
-    plot_roc_curve, save_distance_hist, save_three_panel
+    set_seed, plot_curves, accuracy, plot_confusion_matrix,
+    plot_roc_curve, plot_curve
 )
 
 torch.backends.cudnn.benchmark = True
@@ -281,6 +281,7 @@ def train():
         sched.step()
         if s1_va_loss[-1] < best_val - 1e-4:
             best_val, best_ep = s1_va_loss[-1], ep
+            # Save best EMA weights during training when improved
             torch.save(ema_siam.shadow, os.path.join(
                 config.ARTIFACTS, "siamese_stage1_ema.pt"))
             torch.save(ema_aux.shadow,  os.path.join(
@@ -291,27 +292,34 @@ def train():
 
     print("[TRAIN:S1] finished")
 
+    # Ensure EMA weights are saved even if there was no improvement at all
+    torch.save(ema_siam.shadow, os.path.join(
+        config.ARTIFACTS, "siamese_stage1_ema.pt"))
+    torch.save(ema_aux.shadow,  os.path.join(
+        config.ARTIFACTS, "aux_head_ema.pt"))
+
     # plots (Stage-1)
     if config.SAVE_PLOTS:
-        plot_curves(s1_tr_loss, s1_va_loss, "Stage-1 (Triplet+CE or SupCon) Loss",
-                    config.ARTIFACTS, "s1_loss.png", smooth_k=smooth_k)
-        plot_curves(s1_tr_acc,  s1_va_acc,  "Stage-1 Accuracy",
-                    config.ARTIFACTS, "s1_acc.png",  smooth_k=smooth_k)
-        plot_curves(s1_tr_auc,  s1_va_auc,  "Stage-1 AUC-ROC",
-                    config.ARTIFACTS, "s1_auc.png",  smooth_k=smooth_k)
-        save_three_panel(
-            xs=list(range(1, len(s1_tr_loss) + 1)),
-            y_left=[s1_tr_loss, s1_va_loss],
-            y_mid=[s1_tr_acc,   s1_va_acc],
-            y_right=[s1_tr_auc, s1_va_auc],
-            labels_left=["Train", "Val"],
-            labels_mid=["Train", "Val"],
-            labels_right=["Train", "Val"],
-            title_left="Loss",
-            title_mid="Accuracy",
-            title_right="AUC-ROC",
-            out_path=os.path.join(config.ARTIFACTS, "training_plots.png"),
-            smooth_k=smooth_k,
+        # Siamese loss train vs val
+        plot_curves(
+            s1_tr_loss, s1_va_loss,
+            "Siamese Network Loss (train vs val)",
+            config.ARTIFACTS, "siamese_loss.png",
+            smooth_k=smooth_k
+        )
+        # Classification - training (Siamese)  [aux head accuracy on train]
+        plot_curve(
+            s1_tr_acc,
+            "Classification - training (Siamese)",
+            config.ARTIFACTS, "siamese_classification_train.png",
+            smooth_k=smooth_k, ylabel="accuracy"
+        )
+        # Classification - testing (Siamese)   [aux head accuracy on validation]
+        plot_curve(
+            s1_va_acc,
+            "Classification - testing (Siamese)",
+            config.ARTIFACTS, "siamese_classification_test.png",
+            smooth_k=smooth_k, ylabel="accuracy"
         )
 
     # load EMA weights for Stage-2 (they validated best)
@@ -326,11 +334,6 @@ def train():
     Xva, yva = cache_embeddings(siam, base_va, device, autocast_kwargs)
     Xte, yte = cache_embeddings(siam, base_te, device, autocast_kwargs)
     print(f"[S2] cached: train={len(Xtr)} val={len(Xva)} test={len(Xte)}")
-
-    if config.SAVE_PLOTS:
-        plot_tsne(Xtr, ytr, os.path.join(config.ARTIFACTS, "tsne_train.png"))
-        save_distance_hist(Xva, yva, os.path.join(
-            config.ARTIFACTS, "val_distance_hist.png"))
 
     tr = DataLoader(TensorDataset(Xtr, ytr), batch_size=256, shuffle=True)
     va = DataLoader(TensorDataset(Xva, yva), batch_size=256, shuffle=False)
@@ -404,12 +407,13 @@ def train():
         )
 
     if config.SAVE_PLOTS:
-        plot_curves(trL, vaL, "Classifier CE Loss", config.ARTIFACTS,
-                    "loss_classifier.png", smooth_k=smooth_k)
-        plot_curves(trA, vaA, "Classifier Accuracy", config.ARTIFACTS,
-                    "acc_classifier.png", smooth_k=smooth_k)
-        plot_curves(trU, vaU, "Classifier AUC-ROC", config.ARTIFACTS,
-                    "auc_classifier.png", smooth_k=smooth_k)
+        # Binary Classification loss train vs val
+        plot_curves(
+            trL, vaL,
+            "Binary Classification Loss (train vs val)",
+            config.ARTIFACTS, "binary_classification_loss.png",
+            smooth_k=smooth_k
+        )
 
     # ---- test ----
     print("[TEST] started")
@@ -430,7 +434,8 @@ def train():
     print("[TEST] finished")
     print("[TRAIN:S2] finished")
 
-    if config.SAVE_MODELS:
+    # Save final weights (optional)
+    if getattr(config, "SAVE_MODELS", True):
         torch.save(siam.state_dict(), os.path.join(
             config.ARTIFACTS, "siamese_final.pt"))
         torch.save(clf.state_dict(),  os.path.join(
