@@ -325,3 +325,8 @@ def train():
             out_path=os.path.join(config.ARTIFACTS, "training_plots.png"),
             smooth_k=config.SMOOTH_K,
         )
+
+    # load EMA weights for Stage-2 (they validated best)
+    siam.load_state_dict(torch.load(os.path.join(config.ARTIFACTS, "siamese_stage1_ema.pt"), map_location=device))
+    clf_aux.load_state_dict(torch.load(os.path.join(config.ARTIFACTS, "aux_head_ema.pt"), map_location=device))
+
