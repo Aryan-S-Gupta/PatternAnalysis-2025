@@ -193,3 +193,77 @@ def plot_sample_grid(imgs, probs, labels, out_path, k=25):
     plt.tight_layout()
     plt.savefig(out_path, dpi=180)
     plt.close()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--siamese", default="", type=str)
+    parser.add_argument("--classifier", default="", type=str)
+    parser.add_argument("--tta", default=1, type=int, choices=[1, 2, 4, 8])
+    args = parser.parse_args()
+
+    set_seed(config.SEED)
+    ensure_dir(config.ARTIFACTS)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # data
+    _, val_loader, test_loader, _ = make_loaders()
+
+    # models
+    siam, clf = load_models(device, args.siamese, args.classifier)
+
+    # --- VAL: choose threshold ---
+    print("[predict] inferring on validation to choose threshold...")
+    v_probs, _, v_labels, _, _, _, _ = predict_loader(
+        siam, clf, val_loader, device, tta=args.tta)
+    val_auc = roc_auc_score(v_labels, v_probs)
+    fpr, tpr, thr = roc_curve(v_labels, v_probs)
+    j = tpr - fpr
+    t_star = thr[np.argmax(j)]
+    val_acc_05 = ((v_probs >= 0.5).astype(int) == v_labels).mean()
+    val_acc_ts = ((v_probs >= t_star).astype(int) == v_labels).mean()
+    print(
+        f"[predict] Val AUC={val_auc:.3f} | Val Acc@0.5={val_acc_05:.3f} | Val Acc@t*={val_acc_ts:.3f} | t*={t_star:.3f}")
+
+    # --- TEST: evaluate ---
+    print("[predict] inferring on test...")
+    t_probs, _, t_labels, Z, keep_imgs, keep_probs, keep_labels = predict_loader(
+        siam, clf, test_loader, device, tta=args.tta)
+
+    test_auc = roc_auc_score(t_labels, t_probs)
+    preds_05 = (t_probs >= 0.5).astype(int)
+    preds_ts = (t_probs >= t_star).astype(int)
+    acc_05 = (preds_05 == t_labels).mean()
+    acc_ts = (preds_ts == t_labels).mean()
+    print(
+        f"[predict] Test AUC={test_auc:.3f} | Test Acc@0.5={acc_05:.3f} | Test Acc@t*={acc_ts:.3f}")
+
+    # plots
+    cm05 = os.path.join(config.ARTIFACTS, "confusion_matrix_test_05.png")
+    cmts = os.path.join(config.ARTIFACTS, "confusion_matrix_test_tstar.png")
+    roc = os.path.join(config.ARTIFACTS, "roc_curve_test.png")
+    tsne = os.path.join(config.ARTIFACTS, "tsne_test.png")
+    grid = os.path.join(config.ARTIFACTS, "sample_predictions.png")
+
+    plot_confmat(t_labels, preds_05, cm05,
+                 title="Confusion Matrix (test, thr=0.5)")
+    plot_confmat(t_labels, preds_ts, cmts,
+                 title=f"Confusion Matrix (test, thr={t_star:.2f})")
+    plot_roc(t_labels, t_probs, roc)
+    try:
+        plot_tsne(Z, t_labels, tsne)
+    except Exception as e:
+        print(f"[predict] t-SNE skipped: {e}")
+    try:
+        plot_sample_grid(keep_imgs, keep_probs, keep_labels, grid, k=25)
+    except Exception as e:
+        print(f"[predict] sample grid skipped: {e}")
+
+    print("[predict] Saved:")
+    for p in [cm05, cmts, roc, tsne, grid]:
+        if os.path.exists(p):
+            print("  -", p)
+
+
+if __name__ == "__main__":
+    main()
