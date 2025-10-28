@@ -33,20 +33,9 @@ def _build_transforms(train: bool) -> v2.Compose:
     return v2.Compose((aug if train else []) + common)
 
 
-_EXTS = (".jpg", ".jpeg", ".png", ".tif", ".tiff",
-         ".JPG", ".JPEG", ".PNG", ".TIF", ".TIFF")
-
-
 def _resolve_path(images_dir: str, stem: str) -> Optional[str]:
-    if getattr(config, "ASSUME_JPG", True):
-        p = os.path.join(images_dir, stem + ".jpg")
-        if os.path.exists(p):
-            return p
-    for ext in _EXTS:
-        p = os.path.join(images_dir, stem + ext)
-        if os.path.exists(p):
-            return p
-    return None
+    p = os.path.join(images_dir, stem + ".jpg")
+    return p if os.path.exists(p) else None
 
 # ---------- metadata & split ----------
 

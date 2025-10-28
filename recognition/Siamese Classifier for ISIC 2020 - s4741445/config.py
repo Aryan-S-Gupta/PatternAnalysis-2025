@@ -38,8 +38,5 @@ SAVE_MODELS = True
 # Split hygiene
 USE_PATIENT_SPLIT = True   # grouped by patient_id, preserves class balance
 
-# Path resolving
-ASSUME_JPG = True          # quick path resolve
-
 # Plot smoothing
 SMOOTH_K = 3               # moving-average window for training_plots
