@@ -43,3 +43,28 @@ def _resolve_path(images_dir: str, stem: str) -> Optional[str]:
         p = os.path.join(images_dir, stem + ext)
         if os.path.exists(p): return p
     return None
+
+# ---------- metadata & split ----------
+def _read_metadata(csv_path: str) -> pd.DataFrame:
+    df = pd.read_csv(csv_path)
+    if "isic_id" not in df.columns and "image_name" in df.columns:
+        df = df.rename(columns={"image_name":"isic_id"})
+    assert "isic_id" in df.columns and "target" in df.columns
+    keep = ["isic_id","target"] + (["patient_id"] if "patient_id" in df.columns else [])
+    df = df[keep].dropna(subset=["isic_id","target"]).reset_index(drop=True)
+    df["isic_id"] = df["isic_id"].astype(str)
+    df["target"]  = df["target"].astype(int)
+    return df
+
+def _stratified_split(df, val_frac, test_frac, seed):
+    rng = random.Random(seed)
+    parts = []
+    for _, g in df.groupby("target"):
+        idxs = list(g.index); rng.shuffle(idxs)
+        n = len(idxs); n_test = int(round(test_frac*n)); n_val = int(round(val_frac*n))
+        test_idx = idxs[:n_test]; val_idx = idxs[n_test:n_test+n_val]; train_idx = idxs[n_test+n_val:]
+        parts += [("train", g.loc[train_idx]), ("val", g.loc[val_idx]), ("test", g.loc[test_idx])]
+    train = pd.concat([p for k,p in parts if k=="train"]).sample(frac=1, random_state=seed)
+    val   = pd.concat([p for k,p in parts if k=="val"]).sample(frac=1, random_state=seed)
+    test  = pd.concat([p for k,p in parts if k=="test"]).sample(frac=1, random_state=seed)
+    return train.reset_index(drop=True), val.reset_index(drop=True), test.reset_index(drop=True)
