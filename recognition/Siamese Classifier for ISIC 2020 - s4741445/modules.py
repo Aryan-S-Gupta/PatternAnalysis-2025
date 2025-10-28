@@ -7,10 +7,7 @@ import config
 class ResNet50Embedder(nn.Module):
     def __init__(self):
         super().__init__()
-        if config.PRETRAINED_BACKBONE:
-            m = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
-        else:
-            m = resnet50(weights=None)
+        m = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
         m.fc = nn.Identity()  # 2048-d
         self.backbone = m
         self.proj = nn.Sequential(
@@ -22,6 +19,7 @@ class ResNet50Embedder(nn.Module):
         f = self.backbone(x)        # [B,2048]
         z = self.proj(f)            # [B,256]
         return nn.functional.normalize(z, p=2, dim=1)
+
 
 class SiameseTriplet(nn.Module):
     def __init__(self):
