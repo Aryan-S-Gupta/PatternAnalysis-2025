@@ -9,7 +9,7 @@ from sklearn.metrics import roc_auc_score
 
 import config
 from data import make_loaders, make_triplet_loaders_from_splits
-from models import SiameseTriplet, HeadBinaryClassifier
+from modules import SiameseTriplet, HeadBinaryClassifier
 from utils import (
     set_seed, plot_curves, accuracy, plot_tsne, plot_confusion_matrix,
     plot_roc_curve, save_distance_hist, save_three_panel
