@@ -85,3 +85,31 @@ def _grouped_split(df, group_col, val_frac, test_frac, seed):
     val   = pd.concat([p for k,p in parts if k=="val"]).sample(frac=1, random_state=seed)
     test  = pd.concat([p for k,p in parts if k=="test"]).sample(frac=1, random_state=seed)
     return train.reset_index(drop=True), val.reset_index(drop=True), test.reset_index(drop=True)
+
+
+# ---------- datasets ----------
+class ISICSingle(Dataset):
+    def __init__(self, images_dir: str, table: pd.DataFrame, train: bool):
+        self.dir = images_dir
+        self.tfm = _build_transforms(train)
+        seed = getattr(config, "SEED", 42)
+        lim = int(getattr(config, "FAST_LIMIT_PER_CLASS", 0))
+        if getattr(config, "FAST_DEBUG", False) and lim > 0:
+            frames = []
+            for _, g in table.groupby("target"):
+                frames.append(g.sample(n=min(lim, len(g)), random_state=seed))
+            table = pd.concat(frames, axis=0).sample(frac=1, random_state=seed).reset_index(drop=True)
+        keep = []
+        for _, r in table.iterrows():
+            p = _resolve_path(images_dir, str(r["isic_id"]))
+            if p: keep.append((p, int(r["target"])))
+        self.paths  = [p for p,_ in keep]
+        self.labels = [y for _,y in keep]
+
+    def __len__(self): return len(self.paths)
+
+    def __getitem__(self, idx: int):
+        img = Image.open(self.paths[idx]).convert("RGB")
+        x = self.tfm(img)
+        y = int(self.labels[idx])
+        return x, torch.tensor(y, dtype=torch.long)
