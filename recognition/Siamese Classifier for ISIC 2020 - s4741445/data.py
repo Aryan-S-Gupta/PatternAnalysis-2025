@@ -113,3 +113,72 @@ class ISICSingle(Dataset):
         x = self.tfm(img)
         y = int(self.labels[idx])
         return x, torch.tensor(y, dtype=torch.long)
+
+
+class ISICTriplet(Dataset):
+    """Returns (anchor, positive, negative, label_of_anchor)."""
+    def __init__(self, images_dir: str, table: pd.DataFrame, train: bool):
+        seed = getattr(config, "SEED", 42)
+        lim = int(getattr(config, "FAST_LIMIT_PER_CLASS", 0))
+        if getattr(config, "FAST_DEBUG", False) and lim > 0:
+            frames = []
+            for _, g in table.groupby("target"):
+                frames.append(g.sample(n=min(lim, len(g)), random_state=seed))
+            table = pd.concat(frames, axis=0).sample(frac=1, random_state=seed).reset_index(drop=True)
+
+        self.dir = images_dir
+        self.tfm = _build_transforms(train)
+        self.records: List[tuple[str,int]] = []
+        self.class_to_indices: Dict[int, List[int]] = defaultdict(list)
+        for _, r in table.iterrows():
+            p = _resolve_path(images_dir, str(r["isic_id"]))
+            if not p: continue
+            y = int(r["target"])
+            self.class_to_indices[y].append(len(self.records))
+            self.records.append((p, y))
+        assert 0 in self.class_to_indices and 1 in self.class_to_indices, "need both classes"
+
+    def __len__(self): return len(self.records)
+
+    def _load(self, idx: int):
+        p, y = self.records[idx]
+        return self.tfm(Image.open(p).convert("RGB")), y
+
+    def __getitem__(self, idx: int):
+        xa, ya = self._load(idx)
+        pos_pool = self.class_to_indices[ya]
+        pos_idx = idx
+        if len(pos_pool) > 1:
+            while pos_idx == idx:
+                pos_idx = random.choice(pos_pool)
+        xp, _ = self._load(pos_idx)
+        yn = 1 - ya
+        neg_idx = random.choice(self.class_to_indices[yn])
+        xn, _ = self._load(neg_idx)
+        return xa, xp, xn, torch.tensor(ya, dtype=torch.long)
+
+class BalancedAnchorBatchSampler(BatchSampler):
+    """Balanced anchors per class; with-replacement; steps_per_epoch controls runtime."""
+    def __init__(self, dataset: ISICTriplet, batch_size: int, seed: int = 42, steps_per_epoch: int | None = None):
+        self.dataset = dataset
+        self.bs = max(2, int(batch_size))
+        self.rng = random.Random(seed)
+        self.c0 = dataset.class_to_indices[0][:]
+        self.c1 = dataset.class_to_indices[1][:]
+        self.k0 = self.bs // 2
+        self.k1 = self.bs - self.k0
+        self.n_batches = (max(1, int(steps_per_epoch))
+                          if steps_per_epoch is not None
+                          else max(1, min(len(self.c0), len(self.c1)) // max(1, min(self.k0, self.k1))))
+
+    def __iter__(self):
+        for _ in range(self.n_batches):
+            b0 = (self.rng.sample(self.c0, self.k0) if len(self.c0) >= self.k0
+                  else [self.rng.choice(self.c0) for _ in range(self.k0)])
+            b1 = (self.rng.sample(self.c1, self.k1) if len(self.c1) >= self.k1
+                  else [self.rng.choice(self.c1) for _ in range(self.k1)])
+            batch = b0 + b1
+            self.rng.shuffle(batch)
+            yield batch
+
+    def __len__(self): return self.n_batches
