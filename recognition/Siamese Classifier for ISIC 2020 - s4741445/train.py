@@ -414,3 +414,37 @@ def train():
               f"loss tr/val {trL[-1]:.4f}/{vaL[-1]:.4f} | "
               f"acc tr/val {trA[-1]:.3f}/{vaA[-1]:.3f} | "
               f"AUC tr/val {trU[-1]:.3f}/{vaU[-1]:.3f}")
+
+    if config.SAVE_PLOTS:
+        plot_curves(trL, vaL, "Classifier CE Loss", config.ARTIFACTS,
+                    "loss_classifier.png", smooth_k=config.SMOOTH_K)
+        plot_curves(trA, vaA, "Classifier Accuracy", config.ARTIFACTS,
+                    "acc_classifier.png", smooth_k=config.SMOOTH_K)
+        plot_curves(trU, vaU, "Classifier AUC-ROC", config.ARTIFACTS,
+                    "auc_classifier.png", smooth_k=config.SMOOTH_K)
+
+    # test
+    clf.eval()
+    with torch.no_grad():
+        logits = clf(Xte.to(device))
+        probs = torch.softmax(logits, dim=1)[:, 1].cpu()
+        preds = logits.argmax(1).cpu()
+
+    if config.SAVE_PLOTS:
+        plot_confusion_matrix(yte.cpu(), preds, ["Benign", "Malignant"],
+                              os.path.join(config.ARTIFACTS, "confusion_matrix.png"))
+        plot_roc_curve(yte.cpu(), probs, os.path.join(
+            config.ARTIFACTS, "roc_curve.png"))
+
+    test_acc = accuracy(clf, Xte, yte, device)
+    print(f"Test accuracy: {test_acc:.4f}")
+
+    if config.SAVE_MODELS:
+        torch.save(siam.state_dict(), os.path.join(
+            config.ARTIFACTS, "siamese_final.pt"))
+        torch.save(clf.state_dict(),  os.path.join(
+            config.ARTIFACTS, "classifier.pt"))
+
+
+if __name__ == "__main__":
+    train()
