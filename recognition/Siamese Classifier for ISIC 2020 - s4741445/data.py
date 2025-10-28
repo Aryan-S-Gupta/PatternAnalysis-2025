@@ -68,3 +68,20 @@ def _stratified_split(df, val_frac, test_frac, seed):
     val   = pd.concat([p for k,p in parts if k=="val"]).sample(frac=1, random_state=seed)
     test  = pd.concat([p for k,p in parts if k=="test"]).sample(frac=1, random_state=seed)
     return train.reset_index(drop=True), val.reset_index(drop=True), test.reset_index(drop=True)
+
+def _grouped_split(df, group_col, val_frac, test_frac, seed):
+    rng = random.Random(seed)
+    parts = []
+    for _, g in df.groupby("target"):
+        groups = list(g[group_col].dropna().astype(str).unique())
+        rng.shuffle(groups)
+        n = len(groups); n_test = int(round(test_frac*n)); n_val = int(round(val_frac*n))
+        test_g = set(groups[:n_test]); val_g = set(groups[n_test:n_test+n_val]); train_g = set(groups[n_test+n_val:])
+        train = g[g[group_col].astype(str).isin(train_g)]
+        val   = g[g[group_col].astype(str).isin(val_g)]
+        test  = g[g[group_col].astype(str).isin(test_g)]
+        parts += [("train", train), ("val", val), ("test", test)]
+    train = pd.concat([p for k,p in parts if k=="train"]).sample(frac=1, random_state=seed)
+    val   = pd.concat([p for k,p in parts if k=="val"]).sample(frac=1, random_state=seed)
+    test  = pd.concat([p for k,p in parts if k=="test"]).sample(frac=1, random_state=seed)
+    return train.reset_index(drop=True), val.reset_index(drop=True), test.reset_index(drop=True)
