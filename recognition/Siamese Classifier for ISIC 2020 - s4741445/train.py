@@ -25,18 +25,14 @@ def d_cos_pair(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 
 def supcon_loss(z: torch.Tensor, y: torch.Tensor, tau: float = 0.07) -> torch.Tensor:
-    """
-    Supervised NT-Xent: z [N,d] L2-normalized, y [N] labels.
-    """
     z = nn.functional.normalize(z, dim=1)
-    sim = z @ z.t() / tau                      # [N,N]
-    sim = sim - torch.eye(sim.size(0), device=sim.device) * \
-        1e9  # mask diagonal
+    sim = z @ z.t() / tau
+    sim = sim - torch.eye(sim.size(0), device=sim.device) * 1e9
     y = y.view(-1, 1)
     pos_mask = (y == y.t()).float()
     pos_mask.fill_diagonal_(0.0)
-    denom = torch.logsumexp(sim, dim=1, keepdim=True)            # [N,1]
-    log_prob = sim - denom                                       # [N,N]
+    denom = torch.logsumexp(sim, dim=1, keepdim=True)
+    log_prob = sim - denom
     pos_count = pos_mask.sum(1).clamp(min=1.0)
     loss = -(pos_mask * log_prob).sum(1) / pos_count
     return loss.mean()
@@ -45,7 +41,6 @@ def supcon_loss(z: torch.Tensor, y: torch.Tensor, tau: float = 0.07) -> torch.Te
 class EMA:
     def __init__(self, model, decay=0.995):
         self.decay = float(decay)
-        # take an initial snapshot (types preserved)
         self.shadow = {k: v.detach().clone()
                        for k, v in model.state_dict().items()}
 
@@ -54,19 +49,14 @@ class EMA:
         for k, v in model.state_dict().items():
             sv = self.shadow.get(k, None)
             if sv is None:
-                # new key appeared; just clone it
                 self.shadow[k] = v.detach().clone()
                 continue
-
             if v.is_floating_point():
-                # EMA only for floating tensors
                 sv.mul_(self.decay).add_(v.detach(), alpha=1.0 - self.decay)
             else:
-                # ints/bools/etc: copy directly (no EMA math)
                 sv.copy_(v)
 
     def load_into(self, model):
-        # load the full shadow dict (floats are EMA’d; others are direct copies)
         model.load_state_dict(self.shadow, strict=True)
 
 
@@ -133,8 +123,7 @@ def train():
     s1_va_pos,  s1_va_neg = [], []
 
     best_val, best_ep = float("inf"), 0
-    best_path = os.path.join(config.ARTIFACTS, "siamese_stage1.pt")
-    print("Stage 1: multi-task (Triplet + Aux CE) with SupCon warmup + EMA")
+    print("[TRAIN:S1] started")
 
     for ep in range(1, config.EPOCHS_SIAMESE + 1):
         # unfreeze backbone
@@ -156,19 +145,16 @@ def train():
         t = (ep - 1) / max(1, (config.EPOCHS_SIAMESE - 1))
         margin = margin_start + t * (margin_end - margin_start)
 
-        # ---- train ----
+        # ---- train step ----
         siam.train()
         clf_aux.train()
         tl = []
         probs = []
         ys = []
-        pos_means = []
-        neg_means = []
 
         for xa, xp, xn, y in tri_tr:
             xa, xp, xn, y = xa.to(device), xp.to(
                 device), xn.to(device), y.to(device)
-
             with torch.autocast(**autocast_kwargs):
                 za = siam.forward_once(xa)
                 zp = siam.forward_once(xp)
@@ -202,8 +188,6 @@ def train():
                     probs.append(torch.softmax(logits, dim=1)
                                  [:, 1].float().cpu())
                     ys.append(y.cpu())
-                    pos_means.append(d_ap.detach().mean().item())
-                    neg_means.append(d_an.detach().mean().item())
 
         tr_loss = float(np.mean(tl))
         s1_tr_loss.append(tr_loss)
@@ -220,7 +204,8 @@ def train():
             except Exception:
                 s1_tr_auc.append(0.5)
 
-        # ---- val on EMA (smooth!) ----
+        # ---- validation on EMA ----
+        print("[VALIDATION:S1] started")
         siam_eval = SiameseTriplet().to(device)
         ema_siam.load_into(siam_eval)
         clf_eval = HeadBinaryClassifier().to(device)
@@ -277,40 +262,43 @@ def train():
                 s1_va_auc.append(0.5)
             s1_va_pos.append(float(np.mean(vpos)))
             s1_va_neg.append(float(np.mean(vneg)))
+        print("[VALIDATION:S1] finished")
 
-        if not np.isnan(s1_va_pos[-1]) and not np.isnan(s1_va_neg[-1]):
-            msg_dist = f" | pos/neg(val) {s1_va_pos[-1]:.3f}/{s1_va_neg[-1]:.3f}"
-        else:
-            msg_dist = ""
+        msg_dist = (
+            f" | mean_distance_pos/neg(val) {s1_va_pos[-1]:.3f}/{s1_va_neg[-1]:.3f}"
+            if not np.isnan(s1_va_pos[-1]) and not np.isnan(s1_va_neg[-1])
+            else ""
+        )
 
         print(
-            f"[S1] ep {ep}/{config.EPOCHS_SIAMESE} "
-            f"loss tr/val {s1_tr_loss[-1]:.4f}/{s1_va_loss[-1]:.4f} | "
-            f"acc tr/val {s1_tr_acc[-1]:.3f}/{s1_va_acc[-1]:.3f} | "
-            f"AUC tr/val {s1_tr_auc[-1]:.3f}/{s1_va_auc[-1]:.3f}{msg_dist}",
+            f"[S1] epoch {ep}/{config.EPOCHS_SIAMESE} | "
+            f"loss train/val {s1_tr_loss[-1]:.4f}/{s1_va_loss[-1]:.4f} | "
+            f"accuracy train/val {s1_tr_acc[-1]:.3f}/{s1_va_acc[-1]:.3f} | "
+            f"auc_roc train/val {s1_tr_auc[-1]:.3f}/{s1_va_auc[-1]:.3f}{msg_dist}",
             flush=True
         )
 
         sched.step()
         if s1_va_loss[-1] < best_val - 1e-4:
             best_val, best_ep = s1_va_loss[-1], ep
-            # save EMA weights (the ones we validate on)
             torch.save(ema_siam.shadow, os.path.join(
                 config.ARTIFACTS, "siamese_stage1_ema.pt"))
             torch.save(ema_aux.shadow,  os.path.join(
                 config.ARTIFACTS, "aux_head_ema.pt"))
         elif ep - best_ep >= 5:
-            print(f"Early stop S1 at {ep}")
+            print(f"[S1] early stop at epoch {ep}")
             break
+
+    print("[TRAIN:S1] finished")
 
     # plots (Stage-1)
     if config.SAVE_PLOTS:
         plot_curves(s1_tr_loss, s1_va_loss, "Stage-1 (Triplet+CE or SupCon) Loss",
-                    config.ARTIFACTS, "s1_loss.png", smooth_k=config.SMOOTH_K)
+                    config.ARTIFACTS, "s1_loss.png", smooth_k=smooth_k)
         plot_curves(s1_tr_acc,  s1_va_acc,  "Stage-1 Accuracy",
-                    config.ARTIFACTS, "s1_acc.png",  smooth_k=config.SMOOTH_K)
+                    config.ARTIFACTS, "s1_acc.png",  smooth_k=smooth_k)
         plot_curves(s1_tr_auc,  s1_va_auc,  "Stage-1 AUC-ROC",
-                    config.ARTIFACTS, "s1_auc.png",  smooth_k=config.SMOOTH_K)
+                    config.ARTIFACTS, "s1_auc.png",  smooth_k=smooth_k)
         save_three_panel(
             xs=list(range(1, len(s1_tr_loss) + 1)),
             y_left=[s1_tr_loss, s1_va_loss],
@@ -323,7 +311,7 @@ def train():
             title_mid="Accuracy",
             title_right="AUC-ROC",
             out_path=os.path.join(config.ARTIFACTS, "training_plots.png"),
-            smooth_k=config.SMOOTH_K,
+            smooth_k=smooth_k,
         )
 
     # load EMA weights for Stage-2 (they validated best)
@@ -333,7 +321,7 @@ def train():
         config.ARTIFACTS, "aux_head_ema.pt"), map_location=device))
 
     # ---- Stage 2: cached embeddings + classifier ----
-    print("[S2] caching embeddings...")
+    print("[TRAIN:S2] started (classifier on cached embeddings)")
     Xtr, ytr = cache_embeddings(siam, base_tr, device, autocast_kwargs)
     Xva, yva = cache_embeddings(siam, base_va, device, autocast_kwargs)
     Xte, yte = cache_embeddings(siam, base_te, device, autocast_kwargs)
@@ -356,8 +344,6 @@ def train():
     plateau = ReduceLROnPlateau(opt, mode="max", factor=0.5, patience=2)
 
     trL, vaL, trA, vaA, trU, vaU = [], [], [], [], [], []
-    print("Stage 2: classifier head...")
-
     for ep in range(1, config.EPOCHS_CLASSIFIER + 1):
         clf.train()
         tl = []
@@ -408,22 +394,25 @@ def train():
         new_lr = opt.param_groups[0]['lr']
         if new_lr < prev_lr:
             print(
-                f"[S2] LR reduced: {prev_lr:.2e} -> {new_lr:.2e} (val AUC={vaU[-1]:.3f})")
+                f"[S2] lr reduced: {prev_lr:.2e} -> {new_lr:.2e} (val auc_roc={vaU[-1]:.3f})")
 
-        print(f"[S2] ep {ep}/{config.EPOCHS_CLASSIFIER} "
-              f"loss tr/val {trL[-1]:.4f}/{vaL[-1]:.4f} | "
-              f"acc tr/val {trA[-1]:.3f}/{vaA[-1]:.3f} | "
-              f"AUC tr/val {trU[-1]:.3f}/{vaU[-1]:.3f}")
+        print(
+            f"[S2] epoch {ep}/{config.EPOCHS_CLASSIFIER} | "
+            f"loss train/val {trL[-1]:.4f}/{vaL[-1]:.4f} | "
+            f"accuracy train/val {trA[-1]:.3f}/{vaA[-1]:.3f} | "
+            f"auc_roc train/val {trU[-1]:.3f}/{vaU[-1]:.3f}"
+        )
 
     if config.SAVE_PLOTS:
         plot_curves(trL, vaL, "Classifier CE Loss", config.ARTIFACTS,
-                    "loss_classifier.png", smooth_k=config.SMOOTH_K)
+                    "loss_classifier.png", smooth_k=smooth_k)
         plot_curves(trA, vaA, "Classifier Accuracy", config.ARTIFACTS,
-                    "acc_classifier.png", smooth_k=config.SMOOTH_K)
+                    "acc_classifier.png", smooth_k=smooth_k)
         plot_curves(trU, vaU, "Classifier AUC-ROC", config.ARTIFACTS,
-                    "auc_classifier.png", smooth_k=config.SMOOTH_K)
+                    "auc_classifier.png", smooth_k=smooth_k)
 
-    # test
+    # ---- test ----
+    print("[TEST] started")
     clf.eval()
     with torch.no_grad():
         logits = clf(Xte.to(device))
@@ -437,7 +426,9 @@ def train():
             config.ARTIFACTS, "roc_curve.png"))
 
     test_acc = accuracy(clf, Xte, yte, device)
-    print(f"Test accuracy: {test_acc:.4f}")
+    print(f"[TEST] accuracy {test_acc:.4f}")
+    print("[TEST] finished")
+    print("[TRAIN:S2] finished")
 
     if config.SAVE_MODELS:
         torch.save(siam.state_dict(), os.path.join(

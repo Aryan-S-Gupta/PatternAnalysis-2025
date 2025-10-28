@@ -1,9 +1,13 @@
+# predict.py
+
 import os
 import argparse
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
-from sklearn.metrics import confusion_matrix, roc_auc_score, RocCurveDisplay, ConfusionMatrixDisplay, roc_curve
+from sklearn.metrics import (
+    confusion_matrix, roc_auc_score, RocCurveDisplay, ConfusionMatrixDisplay, roc_curve
+)
 import matplotlib.pyplot as plt
 
 import config
@@ -22,7 +26,7 @@ def set_seed(seed=42):
     torch.cuda.manual_seed_all(seed)
 
 
-def ensure_dir(p): os.makedirs(p, exist_ok=True)
+def ensure_dir(path): os.makedirs(path, exist_ok=True)
 
 
 @torch.no_grad()
@@ -37,10 +41,10 @@ def denorm(x):
 def tta_variants(x: torch.Tensor, n: int = 1):
     outs = [x]
     if n >= 2:
-        outs.append(torch.flip(x, [-1]))          # hflip
+        outs.append(torch.flip(x, [-1]))                 # hflip
     if n >= 4:
-        outs.append(torch.flip(x, [-2]))                  # vflip
-        outs.append(torch.transpose(x, -1, -2))           # transpose
+        outs.append(torch.flip(x, [-2]))                 # vflip
+        outs.append(torch.transpose(x, -1, -2))          # transpose
     if n >= 8:
         outs += [torch.rot90(x, k, dims=(-2, -1)) for k in (1, -1, 2, -2)]
     return outs[:n]
@@ -75,8 +79,9 @@ def load_models(device, siam_path="", clf_path=""):
     elif os.path.exists(final_clf):
         try_load_state(clf, final_clf)
     elif os.path.exists(ema_aux):
+        # Fallback to aux head EMA if classifier.pt not present
         try_load_state(clf, ema_aux, strict=False)
-        print("[warn] classifier.pt not found; using aux_head_ema.pt fallback.")
+        print("[WARN] classifier.pt not found; using aux_head_ema.pt fallback.")
     else:
         raise FileNotFoundError(
             "No classifier weights found. Provide --classifier or train first.")
@@ -90,41 +95,44 @@ def load_models(device, siam_path="", clf_path=""):
 def predict_loader(siam, clf, loader: DataLoader, device, tta: int = 1):
     probs_all, preds_all, labels_all, embeds_all = [], [], [], []
     keep_imgs, keep_probs, keep_labels = [], [], []
+
     for xb, yb in loader:
         xb = xb.to(device, non_blocking=True)
         yb = yb.to(device, non_blocking=True)
+
         if tta <= 1:
             z = siam.forward_once(xb)
             logits = clf(z)
         else:
-            acc = None
+            acc_logits = None
             for xa in tta_variants(xb, tta):
                 za = siam.forward_once(xa)
                 la = clf(za)
-                acc = la if acc is None else (acc + la)
-            logits = acc / float(tta)
+                acc_logits = la if acc_logits is None else (acc_logits + la)
+            logits = acc_logits / float(tta)
             z = siam.forward_once(xb)  # canonical emb for diagnostics
+
         probs = torch.softmax(logits, dim=1)[:, 1]
         preds = logits.argmax(1)
+
         probs_all.append(probs.float().cpu())
         preds_all.append(preds.cpu())
         labels_all.append(yb.cpu())
         embeds_all.append(z.float().cpu())
-        # small cache for grid
+
+        # cache a few for grid
         k = min(4, xb.size(0))
         keep_imgs += [xb[i].detach().cpu() for i in range(k)]
         keep_probs += [probs[i].detach().cpu() for i in range(k)]
         keep_labels += [yb[i].detach().cpu() for i in range(k)]
+
     P = torch.cat(probs_all).numpy()
     Y = torch.cat(labels_all).numpy()
     H = torch.cat(preds_all).numpy()
     Z = torch.cat(embeds_all, 0)
-    if keep_probs:
-        keep_probs = torch.stack(keep_probs)
-        keep_labels = torch.stack(keep_labels)
-    else:
-        keep_probs = torch.empty(0)
-        keep_labels = torch.empty(0)
+
+    keep_probs = torch.stack(keep_probs) if keep_probs else torch.empty(0)
+    keep_labels = torch.stack(keep_labels) if keep_labels else torch.empty(0)
     return P, H, Y, Z, keep_imgs, keep_probs, keep_labels
 
 
@@ -175,11 +183,11 @@ def plot_sample_grid(imgs, probs, labels, out_path, k=25):
     l = labels.numpy()
     idx = np.argsort(np.abs(p - 0.5))[:k]
     cols = int(np.ceil(np.sqrt(k)))
-    rows = int(np.ceil(k/cols))
-    fig, axes = plt.subplots(rows, cols, figsize=(1.8*cols, 1.8*rows))
+    rows = int(np.ceil(k / cols))
+    fig, axes = plt.subplots(rows, cols, figsize=(1.8 * cols, 1.8 * rows))
     axes = np.array(axes).reshape(rows, cols)
-    for i in range(rows*cols):
-        ax = axes[i//cols, i % cols]
+    for i in range(rows * cols):
+        ax = axes[i // cols, i % cols]
         ax.axis("off")
         if i >= k:
             continue
@@ -188,8 +196,8 @@ def plot_sample_grid(imgs, probs, labels, out_path, k=25):
         pred = int(p[idx[i]] > 0.5)
         true = int(l[idx[i]])
         ok = (pred == true)
-        ax.set_title(f"{'M' if pred else 'B'} {p[idx[i]]:.2f}", color=(
-            "green" if ok else "red"), fontsize=9)
+        ax.set_title(f"{'M' if pred else 'B'} {p[idx[i]]:.2f}",
+                     color=("green" if ok else "red"), fontsize=9)
     plt.tight_layout()
     plt.savefig(out_path, dpi=180)
     plt.close()
@@ -197,23 +205,28 @@ def plot_sample_grid(imgs, probs, labels, out_path, k=25):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--siamese", default="", type=str)
-    parser.add_argument("--classifier", default="", type=str)
-    parser.add_argument("--tta", default=1, type=int, choices=[1, 2, 4, 8])
+    parser.add_argument("--siamese", default="", type=str,
+                        help="Path to Siamese weights")
+    parser.add_argument("--classifier", default="", type=str,
+                        help="Path to classifier weights")
+    parser.add_argument("--tta", default=1, type=int,
+                        choices=[1, 2, 4, 8], help="Test-time augmentation views")
     args = parser.parse_args()
 
     set_seed(config.SEED)
     ensure_dir(config.ARTIFACTS)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # data
+    print("[PREDICT] started")
+
+    # data (CSV + on-disk image presence handled in make_loaders)
     _, val_loader, test_loader, _ = make_loaders()
 
     # models
     siam, clf = load_models(device, args.siamese, args.classifier)
 
-    # --- VAL: choose threshold ---
-    print("[predict] inferring on validation to choose threshold...")
+    # --- VALIDATION: choose threshold ---
+    print("[VALIDATION] started")
     v_probs, _, v_labels, _, _, _, _ = predict_loader(
         siam, clf, val_loader, device, tta=args.tta)
     val_auc = roc_auc_score(v_labels, v_probs)
@@ -223,20 +236,21 @@ def main():
     val_acc_05 = ((v_probs >= 0.5).astype(int) == v_labels).mean()
     val_acc_ts = ((v_probs >= t_star).astype(int) == v_labels).mean()
     print(
-        f"[predict] Val AUC={val_auc:.3f} | Val Acc@0.5={val_acc_05:.3f} | Val Acc@t*={val_acc_ts:.3f} | t*={t_star:.3f}")
+        f"[VALIDATION] auc_roc={val_auc:.3f} | accuracy@0.5={val_acc_05:.3f} | accuracy@t*={val_acc_ts:.3f} | t*={t_star:.3f}")
+    print("[VALIDATION] finished")
 
     # --- TEST: evaluate ---
-    print("[predict] inferring on test...")
+    print("[TEST] started")
     t_probs, _, t_labels, Z, keep_imgs, keep_probs, keep_labels = predict_loader(
-        siam, clf, test_loader, device, tta=args.tta)
-
+        siam, clf, test_loader, device, tta=args.tta
+    )
     test_auc = roc_auc_score(t_labels, t_probs)
     preds_05 = (t_probs >= 0.5).astype(int)
     preds_ts = (t_probs >= t_star).astype(int)
     acc_05 = (preds_05 == t_labels).mean()
     acc_ts = (preds_ts == t_labels).mean()
     print(
-        f"[predict] Test AUC={test_auc:.3f} | Test Acc@0.5={acc_05:.3f} | Test Acc@t*={acc_ts:.3f}")
+        f"[TEST] auc_roc={test_auc:.3f} | accuracy@0.5={acc_05:.3f} | accuracy@t*={acc_ts:.3f}")
 
     # plots
     cm05 = os.path.join(config.ARTIFACTS, "confusion_matrix_test_05.png")
@@ -253,16 +267,19 @@ def main():
     try:
         plot_tsne(Z, t_labels, tsne)
     except Exception as e:
-        print(f"[predict] t-SNE skipped: {e}")
+        print(f"[PREDICT] t-SNE skipped: {e}")
     try:
         plot_sample_grid(keep_imgs, keep_probs, keep_labels, grid, k=25)
     except Exception as e:
-        print(f"[predict] sample grid skipped: {e}")
+        print(f"[PREDICT] sample grid skipped: {e}")
 
-    print("[predict] Saved:")
+    print("[PREDICT] saved:")
     for p in [cm05, cmts, roc, tsne, grid]:
         if os.path.exists(p):
             print("  -", p)
+
+    print("[TEST] finished")
+    print("[PREDICT] finished")
 
 
 if __name__ == "__main__":

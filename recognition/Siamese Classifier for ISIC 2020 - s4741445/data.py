@@ -16,21 +16,14 @@ import config
 
 
 def _build_transforms(train: bool) -> v2.Compose:
-    if getattr(config, "FAST_DEBUG", False):
-        aug = [
-            v2.RandomHorizontalFlip(),
-            v2.RandomVerticalFlip(p=0.2),
-            v2.RandomRotation(8),
-        ]
-    else:
-        aug = [
-            v2.RandomHorizontalFlip(),
-            v2.RandomVerticalFlip(p=0.2),
-            v2.RandomRotation(12),
-            v2.ColorJitter(0.15, 0.15, 0.10, 0.05),
-            v2.RandomResizedCrop(
-                (config.IMAGE_SIZE, config.IMAGE_SIZE), scale=(0.85, 1.0)),
-        ]
+    aug = [
+        v2.RandomHorizontalFlip(),
+        v2.RandomVerticalFlip(p=0.2),
+        v2.RandomRotation(12),
+        v2.ColorJitter(0.15, 0.15, 0.10, 0.05),
+        v2.RandomResizedCrop(
+            (config.IMAGE_SIZE, config.IMAGE_SIZE), scale=(0.85, 1.0)),
+    ]
     common = [
         v2.ToImage(),
         v2.Resize((config.IMAGE_SIZE, config.IMAGE_SIZE), antialias=True),
@@ -40,7 +33,8 @@ def _build_transforms(train: bool) -> v2.Compose:
     return v2.Compose((aug if train else []) + common)
 
 
-_EXTS = (".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG")
+_EXTS = (".jpg", ".jpeg", ".png", ".tif", ".tiff",
+         ".JPG", ".JPEG", ".PNG", ".TIF", ".TIFF")
 
 
 def _resolve_path(images_dir: str, stem: str) -> Optional[str]:
@@ -77,11 +71,11 @@ def _stratified_split(df, val_frac, test_frac, seed):
         idxs = list(g.index)
         rng.shuffle(idxs)
         n = len(idxs)
-        n_test = int(round(test_frac*n))
-        n_val = int(round(val_frac*n))
+        n_test = int(round(test_frac * n))
+        n_val = int(round(val_frac * n))
         test_idx = idxs[:n_test]
-        val_idx = idxs[n_test:n_test+n_val]
-        train_idx = idxs[n_test+n_val:]
+        val_idx = idxs[n_test:n_test + n_val]
+        train_idx = idxs[n_test + n_val:]
         parts += [("train", g.loc[train_idx]),
                   ("val", g.loc[val_idx]), ("test", g.loc[test_idx])]
     train = pd.concat([p for k, p in parts if k == "train"]
@@ -100,11 +94,11 @@ def _grouped_split(df, group_col, val_frac, test_frac, seed):
         groups = list(g[group_col].dropna().astype(str).unique())
         rng.shuffle(groups)
         n = len(groups)
-        n_test = int(round(test_frac*n))
-        n_val = int(round(val_frac*n))
+        n_test = int(round(test_frac * n))
+        n_val = int(round(val_frac * n))
         test_g = set(groups[:n_test])
-        val_g = set(groups[n_test:n_test+n_val])
-        train_g = set(groups[n_test+n_val:])
+        val_g = set(groups[n_test:n_test + n_val])
+        train_g = set(groups[n_test + n_val:])
         train = g[g[group_col].astype(str).isin(train_g)]
         val = g[g[group_col].astype(str).isin(val_g)]
         test = g[g[group_col].astype(str).isin(test_g)]
@@ -117,20 +111,13 @@ def _grouped_split(df, group_col, val_frac, test_frac, seed):
                      ).sample(frac=1, random_state=seed)
     return train.reset_index(drop=True), val.reset_index(drop=True), test.reset_index(drop=True)
 
-
 # ---------- datasets ----------
+
+
 class ISICSingle(Dataset):
     def __init__(self, images_dir: str, table: pd.DataFrame, train: bool):
         self.dir = images_dir
         self.tfm = _build_transforms(train)
-        seed = getattr(config, "SEED", 42)
-        lim = int(getattr(config, "FAST_LIMIT_PER_CLASS", 0))
-        if getattr(config, "FAST_DEBUG", False) and lim > 0:
-            frames = []
-            for _, g in table.groupby("target"):
-                frames.append(g.sample(n=min(lim, len(g)), random_state=seed))
-            table = pd.concat(frames, axis=0).sample(
-                frac=1, random_state=seed).reset_index(drop=True)
         keep = []
         for _, r in table.iterrows():
             p = _resolve_path(images_dir, str(r["isic_id"]))
@@ -152,15 +139,6 @@ class ISICTriplet(Dataset):
     """Returns (anchor, positive, negative, label_of_anchor)."""
 
     def __init__(self, images_dir: str, table: pd.DataFrame, train: bool):
-        seed = getattr(config, "SEED", 42)
-        lim = int(getattr(config, "FAST_LIMIT_PER_CLASS", 0))
-        if getattr(config, "FAST_DEBUG", False) and lim > 0:
-            frames = []
-            for _, g in table.groupby("target"):
-                frames.append(g.sample(n=min(lim, len(g)), random_state=seed))
-            table = pd.concat(frames, axis=0).sample(
-                frac=1, random_state=seed).reset_index(drop=True)
-
         self.dir = images_dir
         self.tfm = _build_transforms(train)
         self.records: List[tuple[str, int]] = []
@@ -185,19 +163,21 @@ class ISICTriplet(Dataset):
         pos_pool = self.class_to_indices[ya]
         pos_idx = idx
         if len(pos_pool) > 1:
+            import random as _r
             while pos_idx == idx:
-                pos_idx = random.choice(pos_pool)
+                pos_idx = _r.choice(pos_pool)
         xp, _ = self._load(pos_idx)
         yn = 1 - ya
-        neg_idx = random.choice(self.class_to_indices[yn])
+        import random as _r
+        neg_idx = _r.choice(self.class_to_indices[yn])
         xn, _ = self._load(neg_idx)
         return xa, xp, xn, torch.tensor(ya, dtype=torch.long)
 
 
 class BalancedAnchorBatchSampler(BatchSampler):
-    """Balanced anchors per class; with-replacement; steps_per_epoch controls runtime."""
+    """Balanced anchors per class; with-replacement; covers dataset approx once/epoch."""
 
-    def __init__(self, dataset: ISICTriplet, batch_size: int, seed: int = 42, steps_per_epoch: int | None = None):
+    def __init__(self, dataset: ISICTriplet, batch_size: int, seed: int = 42):
         self.dataset = dataset
         self.bs = max(2, int(batch_size))
         self.rng = random.Random(seed)
@@ -205,9 +185,11 @@ class BalancedAnchorBatchSampler(BatchSampler):
         self.c1 = dataset.class_to_indices[1][:]
         self.k0 = self.bs // 2
         self.k1 = self.bs - self.k0
-        self.n_batches = (max(1, int(steps_per_epoch))
-                          if steps_per_epoch is not None
-                          else max(1, min(len(self.c0), len(self.c1)) // max(1, min(self.k0, self.k1))))
+        # number of batches that roughly covers the minority class once
+        self.n_batches = max(1, min(
+            len(self.c0) // max(1, self.k0),
+            len(self.c1) // max(1, self.k1)
+        ))
 
     def __iter__(self):
         for _ in range(self.n_batches):
@@ -221,12 +203,14 @@ class BalancedAnchorBatchSampler(BatchSampler):
 
     def __len__(self): return self.n_batches
 
+# ---------- loaders ----------
+
 
 def _dl_kwargs():
     numw = int(getattr(config, "NUM_WORKERS", 0))
     kw = dict(num_workers=numw, pin_memory=True)
     if numw > 0:
-        kw["persistent_workers"] = False
+        kw["persistent_workers"] = True
         kw["prefetch_factor"] = 2
     return kw
 
@@ -234,16 +218,14 @@ def _dl_kwargs():
 def make_loaders():
     df = _read_metadata(config.META_CSV)
 
-    if not getattr(config, "FAST_DEBUG", False):
-        stems = set()
-        for pat in ("*.jpg", "*.png", "*.jpeg"):
-            stems |= {os.path.splitext(os.path.basename(p))[0]
-                      for p in glob.glob(os.path.join(config.IMAGES_DIR, pat))}
-        before = len(df)
-        df = df[df["isic_id"].isin(stems)].reset_index(drop=True)
-        print(f"[data] filtered by listing: {len(df)}/{before} keep")
-    else:
-        print("[data] FAST_DEBUG on: skipping full directory listing.")
+    # Filter rows to only those images that actually exist in IMAGES_DIR
+    stems = set()
+    for pat in ("*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff"):
+        stems |= {os.path.splitext(os.path.basename(p))[0]
+                  for p in glob.glob(os.path.join(config.IMAGES_DIR, pat))}
+    before = len(df)
+    df = df[df["isic_id"].isin(stems)].reset_index(drop=True)
+    print(f"[data] kept {len(df)}/{before} rows with existing files")
 
     if config.USE_PATIENT_SPLIT and "patient_id" in df.columns:
         train_df, val_df, test_df = _grouped_split(
@@ -274,11 +256,7 @@ def make_triplet_loaders_from_splits(train_df, val_df):
     tr_loader = DataLoader(
         train_tri,
         batch_sampler=BalancedAnchorBatchSampler(
-            train_tri,
-            batch_size=config.BATCH_SIZE,
-            seed=config.SEED,
-            steps_per_epoch=getattr(config, "TRIPLET_STEPS_TRAIN", None),
-        ),
+            train_tri, batch_size=config.BATCH_SIZE, seed=config.SEED),
         **dlkw
     )
 
@@ -289,11 +267,7 @@ def make_triplet_loaders_from_splits(train_df, val_df):
     va_loader = DataLoader(
         val_tri,
         batch_sampler=BalancedAnchorBatchSampler(
-            val_tri,
-            batch_size=val_bs,
-            seed=config.SEED,
-            steps_per_epoch=getattr(config, "TRIPLET_STEPS_VAL", None),
-        ),
+            val_tri, batch_size=val_bs, seed=config.SEED),
         **dlkw
     )
     return tr_loader, va_loader
