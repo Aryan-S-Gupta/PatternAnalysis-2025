@@ -327,6 +327,33 @@ def train():
         )
 
     # load EMA weights for Stage-2 (they validated best)
-    siam.load_state_dict(torch.load(os.path.join(config.ARTIFACTS, "siamese_stage1_ema.pt"), map_location=device))
-    clf_aux.load_state_dict(torch.load(os.path.join(config.ARTIFACTS, "aux_head_ema.pt"), map_location=device))
+    siam.load_state_dict(torch.load(os.path.join(
+        config.ARTIFACTS, "siamese_stage1_ema.pt"), map_location=device))
+    clf_aux.load_state_dict(torch.load(os.path.join(
+        config.ARTIFACTS, "aux_head_ema.pt"), map_location=device))
 
+    # ---- Stage 2: cached embeddings + classifier ----
+    print("[S2] caching embeddings...")
+    Xtr, ytr = cache_embeddings(siam, base_tr, device, autocast_kwargs)
+    Xva, yva = cache_embeddings(siam, base_va, device, autocast_kwargs)
+    Xte, yte = cache_embeddings(siam, base_te, device, autocast_kwargs)
+    print(f"[S2] cached: train={len(Xtr)} val={len(Xva)} test={len(Xte)}")
+
+    if config.SAVE_PLOTS:
+        plot_tsne(Xtr, ytr, os.path.join(config.ARTIFACTS, "tsne_train.png"))
+        save_distance_hist(Xva, yva, os.path.join(
+            config.ARTIFACTS, "val_distance_hist.png"))
+
+    tr = DataLoader(TensorDataset(Xtr, ytr), batch_size=256, shuffle=True)
+    va = DataLoader(TensorDataset(Xva, yva), batch_size=256, shuffle=False)
+
+    clf = HeadBinaryClassifier(in_dim=Xtr.shape[1]).to(device)
+    cls_counts = torch.bincount(ytr, minlength=2).float()
+    class_weights = (cls_counts.sum() / (cls_counts + 1e-6)).to(device)
+    ce = nn.CrossEntropyLoss(weight=class_weights, label_smoothing=0.05)
+    opt = Adam(clf.parameters(), lr=config.LR_CLASSIFIER,
+               betas=config.BETAS, weight_decay=1e-4)
+    plateau = ReduceLROnPlateau(opt, mode="max", factor=0.5, patience=2)
+
+    trL, vaL, trA, vaA, trU, vaU = [], [], [], [], [], []
+    print("Stage 2: classifier head...")
