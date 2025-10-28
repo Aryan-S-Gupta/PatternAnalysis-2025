@@ -90,3 +90,53 @@ def plot_roc_curve(y_true, y_score, out_path):
     plt.close()
 
 
+def save_distance_hist(X: torch.Tensor, y: torch.Tensor, out_path: str):
+    X = torch.nn.functional.normalize(X.float(), dim=1)
+    D = torch.cdist(X, X, p=2.0).cpu().numpy()
+    y = y.cpu().numpy()
+    pos = []
+    neg = []
+    for i in range(len(y)):
+        same = (y == y[i])
+        pos.extend(D[i][same & (np.arange(len(y)) != i)])
+        neg.extend(D[i][~same])
+    plt.figure()
+    plt.hist(pos, bins=50, alpha=0.6, label="pos")
+    plt.hist(neg, bins=50, alpha=0.6, label="neg")
+    plt.legend()
+    plt.title("Pairwise distance distribution (val)")
+    plt.xlabel("L2")
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=140)
+    plt.close()
+
+
+def save_three_panel(xs, y_left, y_mid, y_right,
+                     labels_left, labels_mid, labels_right,
+                     title_left, title_mid, title_right,
+                     out_path, smooth_k=1):
+    plt.figure(figsize=(18, 5))
+    ax1 = plt.subplot(1, 3, 1)
+    for y, l in zip(y_left, labels_left):
+        ax1.plot(xs, moving_avg(y, smooth_k), label=l)
+    ax1.set_title(title_left)
+    ax1.set_xlabel("epoch")
+    ax1.legend()
+
+    ax2 = plt.subplot(1, 3, 2)
+    for y, l in zip(y_mid, labels_mid):
+        ax2.plot(xs, moving_avg(y, smooth_k), label=l)
+    ax2.set_title(title_mid)
+    ax2.set_xlabel("epoch")
+    ax2.legend()
+
+    ax3 = plt.subplot(1, 3, 3)
+    for y, l in zip(y_right, labels_right):
+        ax3.plot(xs, moving_avg(y, smooth_k), label=l)
+    ax3.set_title(title_right)
+    ax3.set_xlabel("epoch")
+    ax3.legend()
+
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close()
