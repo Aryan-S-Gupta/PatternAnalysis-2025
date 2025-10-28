@@ -357,3 +357,60 @@ def train():
 
     trL, vaL, trA, vaA, trU, vaU = [], [], [], [], [], []
     print("Stage 2: classifier head...")
+
+    for ep in range(1, config.EPOCHS_CLASSIFIER + 1):
+        clf.train()
+        tl = []
+        probs = []
+        ys = []
+        for xb, yb in tr:
+            xb, yb = xb.to(device), yb.to(device)
+            logits = clf(xb)
+            loss = ce(logits, yb)
+            opt.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(clf.parameters(), config.MAX_NORM)
+            opt.step()
+            tl.append(loss.item())
+            with torch.no_grad():
+                probs.append(torch.softmax(logits, dim=1)[:, 1].float().cpu())
+                ys.append(yb.cpu())
+        trL.append(float(np.mean(tl)))
+        p = torch.cat(probs).numpy()
+        y = torch.cat(ys).numpy()
+        trA.append((p > 0.5).astype(int).mean())
+        try:
+            trU.append(roc_auc_score(y, p))
+        except Exception:
+            trU.append(0.5)
+
+        clf.eval()
+        vl = []
+        probs = []
+        ys = []
+        with torch.no_grad():
+            for xb, yb in va:
+                xb, yb = xb.to(device), yb.to(device)
+                logits = clf(xb)
+                vl.append(ce(logits, yb).item())
+                probs.append(torch.softmax(logits, dim=1)[:, 1].float().cpu())
+                ys.append(yb.cpu())
+        vaL.append(float(np.mean(vl)))
+        p = torch.cat(probs).numpy()
+        y = torch.cat(ys).numpy()
+        vaA.append((p > 0.5).astype(int).mean())
+        try:
+            vaU.append(roc_auc_score(y, p))
+        except Exception:
+            vaU.append(0.5)
+        prev_lr = opt.param_groups[0]['lr']
+        plateau.step(vaU[-1])
+        new_lr = opt.param_groups[0]['lr']
+        if new_lr < prev_lr:
+            print(
+                f"[S2] LR reduced: {prev_lr:.2e} -> {new_lr:.2e} (val AUC={vaU[-1]:.3f})")
+
+        print(f"[S2] ep {ep}/{config.EPOCHS_CLASSIFIER} "
+              f"loss tr/val {trL[-1]:.4f}/{vaL[-1]:.4f} | "
+              f"acc tr/val {trA[-1]:.3f}/{vaA[-1]:.3f} | "
+              f"AUC tr/val {trU[-1]:.3f}/{vaU[-1]:.3f}")
