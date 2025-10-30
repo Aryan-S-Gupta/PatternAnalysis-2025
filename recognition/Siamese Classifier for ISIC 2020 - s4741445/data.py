@@ -1,22 +1,18 @@
 import os
-import random
-import glob
 import time
-import concurrent.futures
-from typing import Optional, List, Dict
-from collections import defaultdict
-
+import glob
+import torch
+import config
+import random
 import pandas as pd
 from PIL import Image
-import torch
-from torch.utils.data import Dataset, DataLoader, BatchSampler
+import concurrent.futures
+from collections import defaultdict
 from torchvision.transforms import v2
+from typing import Optional, List, Dict
+from torch.utils.data import Dataset, DataLoader, BatchSampler
 
-import config
-
-# ---------- transforms ----------
-
-
+# Build image transforms
 def _build_transforms(train: bool) -> v2.Compose:
     # keep your original augmentation choices
     aug = [
@@ -42,14 +38,11 @@ def _build_transforms(train: bool) -> v2.Compose:
 # Only .jpg per your requirement
 _EXTS = (".jpg",)
 
-
 def _resolve_path(images_dir: str, stem: str) -> Optional[str]:
     p = os.path.join(images_dir, stem + ".jpg")
     return p if os.path.exists(p) else None
 
-# ---------- metadata & split ----------
-
-
+# Read metadata CSV
 def _read_metadata(csv_path: str) -> pd.DataFrame:
     df = pd.read_csv(csv_path)
     if "isic_id" not in df.columns and "image_name" in df.columns:
@@ -62,7 +55,7 @@ def _read_metadata(csv_path: str) -> pd.DataFrame:
     df["target"] = df["target"].astype(int)
     return df
 
-
+# Split metadata into train/val/test
 def _stratified_split(df, val_frac, test_frac, seed):
     rng = random.Random(seed)
     parts = []
@@ -85,7 +78,7 @@ def _stratified_split(df, val_frac, test_frac, seed):
                      ).sample(frac=1, random_state=seed)
     return train.reset_index(drop=True), val.reset_index(drop=True), test.reset_index(drop=True)
 
-
+# Grouped split by a column (e.g., patient_id)
 def _grouped_split(df, group_col, val_frac, test_frac, seed):
     rng = random.Random(seed)
     parts = []
@@ -110,9 +103,7 @@ def _grouped_split(df, group_col, val_frac, test_frac, seed):
                      ).sample(frac=1, random_state=seed)
     return train.reset_index(drop=True), val.reset_index(drop=True), test.reset_index(drop=True)
 
-# ---------- fast disk existence filter (parallel, .jpg only) ----------
-
-
+# Filter IDs by checking file existence on disk
 def _filter_ids_by_disk(images_dir: str, df: pd.DataFrame, max_workers: int = 32) -> pd.DataFrame:
     ids = df["isic_id"].astype(str).tolist()
     t0 = time.time()
@@ -126,9 +117,7 @@ def _filter_ids_by_disk(images_dir: str, df: pd.DataFrame, max_workers: int = 32
         f"[data] disk-exists filter (.jpg): {len(kept)}/{len(df)} keep (took {time.time()-t0:.2f}s)")
     return kept
 
-# ---------- datasets ----------
-
-
+# Dataset for single images
 class ISICSingle(Dataset):
     def __init__(self, images_dir: str, table: pd.DataFrame, train: bool):
         self.dir = images_dir
@@ -149,7 +138,7 @@ class ISICSingle(Dataset):
         y = int(self.labels[idx])
         return x, torch.tensor(y, dtype=torch.long)
 
-
+# Dataset for triplet sampling
 class ISICTriplet(Dataset):
     """Returns (anchor, positive, negative, label_of_anchor)."""
 
@@ -186,7 +175,7 @@ class ISICTriplet(Dataset):
         xn, _ = self._load(neg_idx)
         return xa, xp, xn, torch.tensor(ya, dtype=torch.long)
 
-
+# Balanced batch sampler for triplet dataset
 class BalancedAnchorBatchSampler(BatchSampler):
     """Balanced anchors per class; with-replacement; epoch size = len(self)."""
 
@@ -214,7 +203,7 @@ class BalancedAnchorBatchSampler(BatchSampler):
 
     def __len__(self): return self.n_batches
 
-
+# DataLoader creation
 def _dl_kwargs():
     numw = int(getattr(config, "NUM_WORKERS", 4))
     kw = dict(num_workers=numw, pin_memory=True)
@@ -223,7 +212,7 @@ def _dl_kwargs():
         kw["prefetch_factor"] = 4
     return kw
 
-
+# Create DataLoaders for single image dataset
 def make_loaders():
     df = _read_metadata(config.META_CSV)
 
@@ -253,7 +242,7 @@ def make_loaders():
         test_ds,  batch_size=config.BATCH_SIZE, shuffle=False, **dlkw)
     return train_loader, val_loader, test_loader, (train_df, val_df, test_df)
 
-
+# Create DataLoaders for triplet dataset
 def make_triplet_loaders_from_splits(train_df, val_df):
     train_tri = ISICTriplet(config.IMAGES_DIR, train_df, train=True)
     val_tri = ISICTriplet(config.IMAGES_DIR, val_df,   train=False)
