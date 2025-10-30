@@ -6,8 +6,6 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix, RocCurveDisplay, roc_auc_score, ConfusionMatrixDisplay
 
 # set random seeds
-
-
 def set_seed(seed=42):
     random.seed(seed)
     torch.manual_seed(seed)
@@ -15,8 +13,6 @@ def set_seed(seed=42):
     np.random.seed(seed)
 
 # moving average for smoothing plots
-
-
 def moving_avg(x, k=3):
     if k <= 1 or len(x) < 2:
         return x
@@ -25,8 +21,6 @@ def moving_avg(x, k=3):
     return np.convolve(np.array(x, dtype=float), w, mode="same").tolist()
 
 # plot training vs validation curves
-
-
 def plot_curves(train, val, title, out_dir, fname, smooth_k=1):
     os.makedirs(out_dir, exist_ok=True)
     t = moving_avg(train, smooth_k)
@@ -44,8 +38,6 @@ def plot_curves(train, val, title, out_dir, fname, smooth_k=1):
     return path
 
 # plot a single curve
-
-
 def plot_curve(series, title, out_dir, fname, smooth_k=1, ylabel="value"):
     os.makedirs(out_dir, exist_ok=True)
     y = moving_avg(series, smooth_k)
@@ -61,8 +53,6 @@ def plot_curve(series, title, out_dir, fname, smooth_k=1, ylabel="value"):
     return path
 
 # compute accuracy
-
-
 @torch.no_grad()
 def accuracy(clf, X, y, device):
     clf.eval()
@@ -76,8 +66,6 @@ def accuracy(clf, X, y, device):
     return correct / max(1, total)
 
 # confusion matrix plot
-
-
 def plot_confusion_matrix(y_true, y_pred, labels, out_path):
     if torch.is_tensor(y_true):
         y_true = y_true.detach().cpu().numpy()
@@ -93,8 +81,6 @@ def plot_confusion_matrix(y_true, y_pred, labels, out_path):
     plt.close()
 
 # ROC curve plot
-
-
 def plot_roc_curve(y_true, y_score, out_path):
     if torch.is_tensor(y_true):
         y_true = y_true.detach().cpu().numpy()
