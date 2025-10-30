@@ -12,7 +12,7 @@ from sklearn.metrics import roc_auc_score
 from sklearn.manifold import TSNE
 from torchvision.transforms import v2
 from sklearn.decomposition import PCA
-
+from torch.utils.data import Subset
 import config
 from data import make_loaders, make_triplet_loaders_from_splits
 from modules import SiameseTriplet, HeadBinaryClassifier
@@ -698,9 +698,11 @@ def train():
     print(f"[TEST] acc@t* ({t:.3f}) = {acc_t:.3f}")
 
     # --- NEW: prediction grid on first K original test images (eval tfm) ---
-    K = min(32, len(base_te.dataset))
-    small_loader = DataLoader(base_te.dataset, batch_size=K, shuffle=False,
-                              num_workers=0, pin_memory=True)
+    K = min(64, len(base_te.dataset))
+    indices = random.sample(range(len(base_te.dataset)), k=K)
+    subset = Subset(base_te.dataset, indices)
+    small_loader = DataLoader(subset, batch_size=K,
+                              shuffle=False, num_workers=0, pin_memory=True)
     xb_vis, yb_vis = next(iter(small_loader))
     with torch.no_grad():
         with torch.autocast(**autocast_kwargs):
