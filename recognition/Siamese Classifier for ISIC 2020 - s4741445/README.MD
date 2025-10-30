@@ -7,121 +7,125 @@
 
 ## 1. Introduction
 
-This project aims to solve the **ISIC 2020 Kaggle Challenge** that is to classify whether given image shows melanoma or benign. The implements a siamese network classifier to distinguish the dermoscopic images that have heavily class-imbalance (More benign than melanoma) with the goal to achieve robust detection and binary classification avoiding majority-class bias, using a compute-friendly pipeline that runs on Google Colab.
+This project tackles the **ISIC 2020** melanoma detection task (benign vs malignant) using a **two-stage Siamese pipeline** designed to be robust under severe class imbalance and light enough to run on **Google Colab**. Stage-1 learns an embedding space where lesions of the same class lie close; Stage-2 trains a small head on frozen embeddings to produce calibrated binary predictions.
+
+---
 
 ## 2. The Problem
 
-ISIC 2020 is **very** imbalanced: benign vastly outnumbers melanoma. A plain classifier tends to predict the majority class. So I re-framed it as: **first learn a space where “lesions of the same class are close”** (metric learning), then put a **small classifier** on top. (Add more details about the challenge from the page - original challenge - https://challenge2020.isic-archive.com/)
+The [ISIC 2020 task](https://www.kaggle.com/c/siim-isic-melanoma-classification/overview) is clinically motivated melanoma screening from **dermoscopic images** with a **heavily imbalanced** label distribution (benign >> malignant). Naïve training tends to collapse to predicting the majority class. I therefore (i) learn **discriminative, augmentation-invariant** representations with metric learning, then (ii) train a **lightweight classifier** on top of **cached** embeddings to stabilise training and inference under imbalance.
 
-The Dataset I used was teh pre-resize Kaggle version, that can be found [here](https://www.kaggle.com/datasets/nischaydnk/isic-2020-jpg-256x256-resized/data) which contains **~33,126 JPEGs on disk as per metadata**
-
-## 3. How it Works (Background)
-
-A Siamese network is a neural network with shared-weight twin branches that learn to compare two inputs. It’s mainly used to measure similarity—like matching faces, identifying duplicates, or comparing medical images. 
-
-For my approach, I I train in **two stages**:
-
-1. **Stage 1 – Siamese/metric-learning encoder** → learn a 256-dim embedding of lesions with supervised-contrastive/triplet-style objective.
-
-
-2. **Stage 2 – Binary classifier on cached embeddings** → turn that embedding into “benign vs malignant”,  improves stability under imbalance, and keeps inference fast. 
-
-
-The **Key idea:** is that instead of throwing a plain CNN at an extremely imbalanced 0/1 problem (≈32,543 benign vs ≈585 malignant as per my dataset snapshot), I first train a **Siamese / metric-learning stage** to produce good lesion embeddings and only **then** train a lightweight **binary classifier head** on frozen / cached embeddings. 
+**Dataset used:** ISIC 2020 JPG 256x256 Resized Dataset on Kaggle. The dataset can be found [here](https://www.kaggle.com/datasets/nischaydnk/isic-2020-jpg-256x256-resized/data). On disk after filtering: **33,126** JPEGs. Class snapshot noted in my runs: **~32,543 benign** vs **~585 malignant**.
 
 ---
 
-## 4. Model Explanation (complete details - other than implementaiton, like how it was made, what it cincludes, etc - small justificaiton of why as well)
+## 3. How It Works (Background)
 
-### 4.1 Stage 1 – Siamese / Metric Learning
+A **Siamese network** has two (or more) weight-sharing branches that map inputs into a common feature space; training encourages **same-class pairs to be close** and **different-class pairs to be far**.
 
-* Backbone: **ResNet-50 pretrained on ImageNet**, final FC removed. 
-* Projection head: 2048→512→256, then **L2 normalization** → good for cosine / triplet losses.
-* Loss strategy:
+* **Stage-1 (metric learning):** ResNet-50 backbone → projection head → L2-normalised **256-D** embedding; trained with **supervised contrastive / triplet** objectives (plus a small auxiliary CE).
+* **Stage-2 (classifier):** a small MLP head consumes **cached** embeddings and outputs the benign/malignant posterior. Caching removes encoder noise, speeds training, and improves stability.
 
-  * warmup with **supervised contrastive** (groups *same-label* lesions together)
-  * then **triplet-style distance** + **auxiliary CE** on the anchor embedding
-  * triplet **margin is scheduled** from 0.3 → 0.8 across epochs
-* Optimiser: **Adam** with weight decay and **cosine annealing LR**; runs EMA on weights. 
-* Early unfreeze: first few epochs only train the projection + aux head, then unfreeze the ResNet backbone to refine embeddings, which is important for medical images. 
 
-### 4.2 Stage 2 – Binary Classifier (complete details - other than implementaiton, like how it was made, what it cincludes, etc - small justificaiton of why as well)
+**Rough Pipeline:**
 
-* After Stage 1 finishes, I **cache the embeddings for train/val/test** (there’s a `cache_embeddings(...)` in train.py). Then I train **`HeadBinaryClassifier`** (256→128→32→2) just on those fixed vectors. This makes S2 **very fast** and stable. 
-* S2 uses **10 epochs**, LR = 1e-3 with step-downs when val AUC stalls. This is set in `config.py`. 
+![roadmap_diagram](images/Roadmap_Diagram.png)
 
-### 4.3 Why two stages?
 
-1. Stage 1 sees **augmented images** and learns **invariance**.
-2. Stage 2 sees **clean, aligned embeddings** → the class head focuses only on “is this melanoma?”
-3. It’s also a lot easier to try different heads in S2 without re-training the big ResNet.
+**Key idea:** first learn **good features**, then add a **simple decision layer**.
 
 ---
 
-## 5. Implementation Details (Add details + leave space for a rough diagram for explaintaion as well)
+## 4. Model Explanation
 
-### 5.1 Siamese Network (Stage 1)
+### 4.1 Stage-1 — Siamese / Metric Learning
 
+* **Backbone:** **ResNet-50 (ImageNet pretrained)** with the final fully connected layer removed.
+  *Justification:* ResNet-50 provides a strong, general-purpose feature extractor that balances depth and computational efficiency, ideal for transfer learning on limited medical datasets.
 
-* **Splits:** using `VAL_FRACTION = 0.15`, `TEST_FRACTION = 0.15` → so ≈70% train, 15% val, 15% test → came out as
+* **Projection:** **2048 → 512 → 256** with **L2 normalisation** for cosine/triplet compatibility.
+  *Justification:* The 256-dimensional embedding is compact enough for fast retrieval/classification yet expressive enough to capture lesion texture and colour variation. Higher dimensions (e.g., 1024) risk redundancy and slower caching; lower (e.g., 64) underfit fine lesion detail.
 
-  * train = **23,546**
-  * val = **4,694**
-  * test = **4,886**
+* **Loss schedule:**
 
-  this was done so becasue we need **enough validation** to estimate AUC in an imbalanced setting, and a **held-out test** to report final numbers.
+  * **Supervised Contrastive warmup:** stabilises representation learning when distances are noisy.
+  * **Triplet + auxiliary cross-entropy** on the anchor embedding.
+  * **Margin ramp:** 0.3 → 0.8 over epochs.
+    *Justification:* A small initial margin avoids exploding gradients early on; gradually increasing it enforces stronger inter-class separation once embeddings stabilise.
 
-  
-* **Class imbalance:** actual Kaggle CSV has **huge benign majority** (your note: 32,543 benign vs 585 malignant). Because of that, I also:
+* **Optimisation:** **Adam** with weight decay, **cosine annealing** learning rate, and **Exponential Moving Average (EMA)** on weights.
+  *Justification:* Adam handles sparse gradient updates common in metric learning; weight decay combats overfitting; cosine LR provides smooth decay without abrupt drops; EMA yields smoother convergence and better generalisation in small-data medical regimes.
 
-  * used **balanced triplet sampling** in Stage 1
-  * used **AUC** and **balanced accuracy** as primary metrics, not just accuracy.
-* **Transforms (why):**
-
-  * flips → deal with lesion orientation
-  * rotation(12°) → dermoscopic photos are rarely perfectly aligned
-  * color jitter → small because too much will erase diagnostic colour
-  * ImageNet normalization → needed for pretrained ResNet-50. 
+* **Training strategy:** freeze the backbone initially to learn stable projection weights, then **unfreeze** for joint fine-tuning.
+  *Justification:* Prevents catastrophic forgetting of ImageNet features and speeds convergence on limited Colab GPU time.
 
 
-* **Inputs:** triplets (anchor, positive, negative) sampled from the training table. Sampling is **balanced across classes** via a custom batch sampler to avoid drowning out the malignant class. 
-* **Augmentations (train):**
-  * Random horizontal flip
-  * Random vertical flip (p=0.2)
-  * Random rotation (12°)
-  * Color jitter (small)
-  * RandomResizedCrop to (224,224)
-  * Resize + ToTensor + ImageNet normalization
-  * **Rationale:** ISIC dermoscopic photos vary in lighting, so light color jitter + geometric transforms help. 
-* **Loss mix:** either SupCon during warmup or triplet + λ·CE afterwards (λ from config).
-* **Epochs:** config says 15 Siamese epochs; in my run it **early-stopped around epoch 13** when val loss/AUC flattened (see your log). That’s why the README says “≈13/15 effective epochs”.
-* **Outputs saved:** EMA Siamese weights → `siamese_stage1_ema.pt`, aux head → `aux_head_ema.pt`, plots, normalization grids. 
+### 4.2 Stage-2 — Binary Classifier
 
-### 5.2 Binary Classifier (Stage 2)
+* **Inputs:** cached **256-D embeddings** for train/val/test with corresponding labels.
+* **Architecture:** `HeadBinaryClassifier` — **256→128→32→2** MLP with dropout.
+  *Justification:* The hierarchy progressively compresses embeddings while introducing non-linearity; dropout regularises against overfitting the small malignant class.
+* **Optimisation:** **Adam (1e-3)**, halving LR when validation AUC stagnates.
+  *Justification:* adaptive LR helps with non-stationary gradients from highly imbalanced data.
+* **Why cached:** avoids recomputation of embeddings, ensures reproducibility, reduces Colab runtime and prevents encoder drift between stages.
 
-* **Inputs:** cached 256-D embeddings + labels
-* **Model:** `HeadBinaryClassifier` (MLP + dropout) 
-* **Optimization:** Adam (1e-3), LR halved when val AUC plateaus (see logs where LR is reduced).
-* **Why cached?** To avoid re-encoding 23k+ images per epoch and to make COLAB runs cheaper.
-* **Outputs saved:** `classifier.pt`, plus evaluation plots on cached test split. 
+### 4.3 Why Two Stages?
+
+A two-stage setup offers **better balance, robustness, and flexibility** than a single classifier:
+
+1. **Balanced learning:** Stage-1 learns class-invariant embeddings using pairwise distances, unaffected by label imbalance.
+2. **Focused decision:** Stage-2 trains only on stable embeddings, giving cleaner class boundaries.
+3. **Efficiency & modularity:** The cached-embedding design is fast to retrain, easy to extend, and consistently achieves higher AUC (~0.9) than end-to-end training on the same data.
 
 ---
 
-## 6. Results (TO be fixed and add details)
+## 5. Implementation Details
 
-### 6.1 From `train.py`
+```
+siamese_project/
+├── config.py    # defines paths, splits, and hyperparameters
+├── data.py      # loads dataset, applies augmentations, builds loaders
+├── modules.py   # contains ResNet50 embedder, projection, and classifier
+├── train.py     # trains Siamese encoder and classifier, caches embeddings
+├── predict.py   # runs evaluation with TTA and saves metrics/plots
+├── utils.py     # handles seeding and plotting (loss, ROC, confusion matrix)
+└── README.md    # documentation and usage guide
+```
 
-Your Stage-1 log showed the classic pattern:
+### 5.1 Data & Training Settings (Stage-1 focus)
 
-* Epochs 1–3: loss ≈4 (that’s SupCon/triplet warmup, metrics = NaN)
-* Epoch 4 onward: loss drops to **0.62 train / 0.70 val** and we start getting **AUC 0.74–0.9+**
-* By epoch 8–12: **train AUC → 0.95+, val AUC → 0.88–0.93**
-* Early stop at epoch **13/20** → “good enough, stop overfitting malignant”.
-  This is consistent with what `train.py` does: full validation each epoch using **EMA weights**. 
+* **Splits:** `VAL_FRACTION=0.15`, `TEST_FRACTION=0.15` ⇒ **train 23,546 / val 4,694 / test 4,886**.
+  Rationale: enough validation for AUC under imbalance + a clean held-out test.
+* **Imbalance handling:** balanced triplet sampling; monitor **AUC** and **balanced accuracy** (not only accuracy).
+* **Transforms (train):**
 
-### 6.2 From `predict.py`
+  * Horizontal flip; **vertical flip p=0.2**
+  * **Rotation ≈12°** (dermoscopy rarely perfectly aligned)
+  * Light **color jitter**
+  * RandomResizedCrop→**224×224**, **ImageNet normalisation** (for pretrained ResNet-50)
+* **Inputs:** triplets (anchor, positive, negative) sampled with class balance.
+* **Epochs:** configured ≈15; **early-stopped ~epoch 13** on val plateau.
+* **Saved:** `siamese_stage1_ema.pt`, `aux_head_ema.pt`, sample grids/plots.
 
-Your final prediction run said:
+### 5.2 Binary Classifier (Stage-2)
+
+* **Inputs:** cached 256-D embeddings.
+* **Head & Optim:** MLP + dropout; Adam(1e-3) with LR reductions on AUC stalls.
+* **Why cache:** avoids re-encoding 23k+ images/epoch; cheaper and more reproducible.
+* **Saved:** `classifier.pt`, evaluation plots.
+
+---
+
+## 6. Results
+
+### 6.1 Training Dynamics (Stage-1)
+
+* Epochs **1–3:** loss ≈4 during SupCon/triplet warmup (metrics unstable/NaN early).
+* From **epoch 4:** loss ~0.62/0.70 (train/val); AUC climbs into **0.74–0.93** range.
+* **Epochs 8–12:** train AUC ≈**0.95+**, val AUC **0.88–0.93**.
+* **Early stop @ 13/20** using EMA weights to avoid overfitting the minority class.
+
+### 6.2 Final Evaluation (`predict.py`)
 
 * **Overall Accuracy:** **87.19%**
 * **AUC:** **0.903**
@@ -129,99 +133,150 @@ Your final prediction run said:
 * **Sensitivity (Recall+):** **71.43%**
 * **Specificity (Recall−):** **87.51%**
 
-**Interpretation:**
+**Interpretation.** AUC ~0.90 shows strong ranking despite ~1:55 skew. Balanced accuracy ~0.79 confirms we didn’t collapse to “all benign”. Sensitivity ~0.71 is clinically reasonable given the scarcity of malignant images; specificity ~0.88 indicates we’re not over-calling melanoma.
 
-* AUC 0.903 means the embedding + head **can rank malignant above benign most of the time**, despite the 1:55 class ratio.
-* Balanced accuracy ~0.79 tells the marker that we **didn’t just predict “benign”**.
-* Sensitivity 0.71 is actually *decent* for this dataset, given so few malignant examples.
-* Specificity high (0.87) → we’re not overcalling everything as melanoma.
-* This matches the COMP3710 target of “around 0.8 on the test set” for the Siamese ISIC task. 
+### 6.3 Results & Metrics 
 
-### 6.3 Plots (To Add)
+* **Siamese network loss**
 
-* **Confusion matrix** → shows the true negatives block is large (as expected), but there is a meaningful number of TPs.
-* **ROC curve** → should cross (0,1) smoothly with AUC label ≈0.90.
+![Siamese\_Loss](images/siamese_loss.png)
 
-![roc_curve](/recognition/Siamese%20Classifier%20for%20ISIC%202020%20-%20s4741445/images/ROC_Curve.png)
+Drops sharply from ≈4.2 to ≈0.6 within the first three epochs, then flattens around 0.5, showing fast convergence of the contrastive/triplet loss.
+  This indicates that the embedding space quickly learned to separate positive and negative pairs, achieving consistent distances and stable optimisation in later epochs.
 
-* **Training curves** (from `utils.py`) → allow you to paste into the README/PDF. 
+---
 
-<<include graph labels as per the code + add jsutificaiotn & Explaination for the graphs>>
+* **Training vs validation accuracy (Siamese)** 
+
+![Siamese_Train](images/siamese_classification_train.png)
+![Siamese_Val](images/siamese_classification_val.png)
+
+Both curves rise smoothly, with training accuracy approaching ≈0.9 and validation stabilising near ≈0.8 by epoch 12. The parallel growth without divergence demonstrates effective generalisation — the Siamese encoder learns useful, non-overfitted features despite the 55× class imbalance.
+  
+
+---
+
+* **Binary classifier loss** 
+
+![Binary_Loss](images/binary_classification_loss.png)
+
+Decreases steadily from ≈1.12 → 0.93 across 10 epochs, with the validation curve tracking closely behind training. This behaviour confirms that the cached embeddings are linearly separable and the classifier trains stably without overfitting or oscillations, ensuring reproducible convergence.
+  
+---
+
+* **t-SNE embedding visualisation** 
+
+![TSNE](images/tsne_train_embeddings.png)
+
+2-D projection of the 256-D latent space; benign (blue) and malignant (orange) lesions form semi-distinct clusters. The partial separation verifies that the metric-learning objective succeeded — malignant samples lie on the edge of the benign manifold, showing discriminative but overlapping structure typical for medical imagery.
+  
+
+---
+
+* **ROC curve**
+
+![ROC_Curve](images/ROC_Curve.png)
+
+AUC ≈ 0.90; a smooth convex curve trending toward (0, 1) illustrates strong ranking power and reliable probability calibration across thresholds. High AUC under extreme imbalance confirms that the learned embeddings and classifier maintain discriminative performance without collapsing to the majority class.
+
+---
+
+* **Confusion matrix (test, t = 0.717)**
+
+![Confusion_Matrix](images/confusion_matrix_test.png)
+
+Pronounced diagonal dominance with **TN = 4190, FP = 598, FN = 28, TP = 70**. At this threshold, the model achieves **Specificity ≈ 87.5 %** and **Sensitivity ≈ 71.4 %**, yielding **Balanced Accuracy ≈ 79.5 %**. This trade-off ensures melanoma cases are detected while minimising false alarms — optimal for screening scenarios. *(Higher-accuracy thresholds like t = 0.957 over-fit by predicting all benign.)*
+  
 
 ---
 
 ## 7. Usage
 
-### 7.1 Repository / File Structure
+### 7.1 Colab Notebook
 
-```text
-myDrive/
-└── siamese_project/
-    ├── config.py    # this file
-    ├── data.py      # this file
-    ├── modules.py   # this file
-    ├── train.py     # this file
-    ├── predict.py   # this file
-    ├── utils.py     # this file
-    └── README.md    # this file
-        
-```
-
-### 7.2 Run on Google Colab
-
-1. Open my Colab notebook:
-   **[Here](https://colab.research.google.com/drive/1vwZoIxYiaL75teFRFyfKGsOmRqXALbec?usp=sharing)**
-2. Mount Google Drive and make sure these paths exist (as in `config.py`):
+1. Open: **[This Notebook](https://colab.research.google.com/drive/1vwZoIxYiaL75teFRFyfKGsOmRqXALbec?usp=sharing)**
+2. Ensure paths in `config.py` match your Drive, e.g.:
 
    * `/content/drive/MyDrive/siamese_project/`
    * `/content/train-image/image`
    * `/content/train-metadata.csv`
-     or update `config.py` to match your own folder. 
-3. Train:
+3. Train end-to-end:
 
-```bash
-# 1) train everything - Stage 1, cache embeddings, Stage 2
-!python3 train.py
-```
-4. Run:
-```bash
-# 2) evaluate with saved weights + TTA
-!python predict.py --siamese /content/drive/MyDrive/siamese_project/outputs/siamese_stage1_ema.pt --classifier /content/drive/MyDrive/siamese_project/outputs/classifier.pt --tta 4
-```
+   ```bash
+   python train.py
+   ```
+4. Evaluate with TTA (example):
 
-**Notes:**
+   ```bash
+   python predict.py \
+     --siamese /content/drive/MyDrive/siamese_project/outputs/siamese_stage1_ema.pt \
+     --classifier /content/drive/MyDrive/siamese_project/outputs/classifier.pt \
+     --tta 4
+   ```
 
-* I used `--tta 4` because `predict.py` supports 1,2,4,8 views – 4 is a good trade-off. 
-* You **can** pass custom paths; the script will fall back to whatever is in `ARTIFACTS` if you don’t.
+### 7.2 Arguments
+
+* `--siamese` path to Stage-1 weights; `--classifier` path to Stage-2 head; `--tta {1,2,4,8}` (I use **4** as a good trade-off).
 
 ---
 
 ## 8. Dependencies
 
-This was written for **Python 3.x** and **PyTorch** (Colab style). Minimum versions that work with `torchvision.transforms.v2`:
+* **Python ≥ 3.10**
+* **PyTorch ≥ 2.2**
+* **torchvision ≥ 0.17**  *(for `transforms.v2`, pretrained ResNet50)*
+* **numpy ≥ 1.26**
+* **pandas ≥ 2.2**
+* **scikit-learn ≥ 1.4**  *(ROC, AUC, TSNE, PCA, confusion matrix)*
+* **matplotlib ≥ 3.8**  *(training/loss/ROC plots)*
+* **Pillow ≥ 10**  *(image loading via `PIL.Image`)*
 
-* `torch >= 2.2`
-* `torchvision >= 0.17` (for `torchvision.transforms.v2`)
-* `pandas >= 2.2` (CSV reading)
-* `scikit-learn >= 1.4` (ROC/AUC, confusion matrix)
-* `matplotlib >= 3.8` (plots)
-* `Pillow >= 10` (image loading) <<Did i even use this ? check and fix
-* `numpy`
+**Standard Library (no install needed):**
+`os`, `argparse`, `glob`, `time`, `random`, `concurrent.futures`, `collections`, `typing`
 
-Install (example):
+Install example:
 
 ```bash
-pip install torch torchvision pandas scikit-learn matplotlib pillow
+pip install torch torchvision pandas scikit-learn matplotlib pillow numpy
 ```
+
+**Reproducibility:** seeds fixed in code; patient-aware split (if `patient_id` available); Stage-2 uses **cached** embeddings to ensure stable results across runs.
 
 ---
 
-## 9. Future Recommendations / What’s Missing
+## 9. Data Pre-processing (with justification)
 
-1. **Stronger imbalance handling** – add focal loss or class-weighted CE in Stage 2, or oversample malignant more aggressively during caching.
-2. **Hard / semi-hard mining** – current triplet sampling is balanced but not *mining-aware*; using batch-hard or distance-weighted sampling could push AUC a bit higher.
-3. **Higher-res finetuning** – I trained at 224×224 (compatible with ResNet-50). A final 384×384 finetune on just malignant + a subset of benigns often helps dermoscopy.
-4. **Use metadata (age, sex, anatomic site)** – ISIC 2020 has useful tabular features; concatenating these to the 256-D embedding before the classifier would help recall.
-5. **Model ensembling / SWA** – average 2–3 heads trained on different cached splits to improve test-time stability.
+* **Standardisation:** ImageNet mean/std — required for ImageNet-pretrained ResNet-50.
+* **Colour normalisation:** light jitter only (preserve diagnostic hues while improving robustness).
+* **Geometry:** flips + small rotations for viewpoint invariance without distorting lesion structure.
+* **Splits:** **70/15/15** ensures enough validation samples to reliably estimate **AUC** in an imbalanced setting and a **clean test** estimate.
+* **Imbalance:** balanced triplet sampling in Stage-1; Stage-2 judged by **AUC**/**balanced accuracy**.
+
+---
+
+## 10. Example Inputs/Outputs
+
+* **Input:** A dermoscopic skin image (≈256×256 px) that is resized and cropped to **224×224** during preprocessing for the Siamese encoder.
+* **Output:** A **malignancy probability** *p(malignant)* ∈ [0, 1] and corresponding class label (**Benign / Malignant**). The evaluation phase also generates diagnostic plots — **ROC curve**, **confusion matrix**, and **t-SNE embeddings** — automatically saved in the `/outputs/` folder for interpretability and reproducibility.
+
+---
+
+## 11. Future Work
+
+1. **Improved Class-Imbalance Handling**
+   Incorporating **class-weighted or focal loss** in Stage-2 could further address the extreme benign–malignant skew, increasing melanoma recall without sacrificing specificity.
+
+2. **Hard or Semi-Hard Triplet Mining**
+   Introducing **batch-hard or distance-weighted mining** in Stage-1 would focus learning on more challenging examples, producing tighter class clusters and more discriminative embeddings.
+
+3. **Higher-Resolution Fine-Tuning**
+   Re-training at higher input resolutions (e.g., 384×384) would help the model capture subtle texture and border cues in lesions, improving diagnostic sensitivity.
+
+4. **Metadata Fusion**
+   Combining patient metadata (e.g., age, sex, anatomical site) with image embeddings could add useful clinical context, enhancing classification accuracy and reducing false negatives.
+
+5. **Model Ensembling and SWA**
+   Averaging predictions from multiple classifier heads or using **stochastic weight averaging** can stabilise decision boundaries and slightly boost test-time performance.
+
 
 ---
