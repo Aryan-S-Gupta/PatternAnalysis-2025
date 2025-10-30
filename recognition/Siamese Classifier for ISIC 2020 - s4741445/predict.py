@@ -16,12 +16,32 @@ IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
 
 
+def best_accuracy_threshold(y_true_np, prob_np):
+    # Dense grid for stable argmax of accuracy
+    thr_grid = np.linspace(0.0, 1.0, 1001)
+    accs = [((prob_np >= t).astype(int) == y_true_np).mean() for t in thr_grid]
+    i = int(np.argmax(accs))
+    return float(thr_grid[i]), float(accs[i])
+
+
 def set_seed(seed=42):
     import random
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+
+def unpack_loader(out):
+    # Supports both (P,H,Y) and (P,H,Y,Z,keep_imgs,keep_probs,keep_labels)
+    if len(out) == 3:
+        P, H, Y = out
+        return P, H, Y, None, None, None, None
+    elif len(out) == 7:
+        return out
+    else:
+        raise ValueError(
+            f"predict_loader returned unexpected arity: {len(out)}")
 
 
 def ensure_dir(path): os.makedirs(path, exist_ok=True)
@@ -87,6 +107,21 @@ def load_models(device, siam_path="", clf_path=""):
     siam.eval()
     clf.eval()
     return siam, clf
+
+
+def pick_threshold_balanced(y_true_np, prob_np, min_pos_rate=0.05, max_pos_rate=0.95):
+    fpr, tpr, thr = roc_curve(y_true_np, prob_np)
+    # Youden's J = TPR - FPR  (maximizes balanced accuracy)
+    j = tpr - fpr
+    # Filter out thresholds that would predict ~all-benign or ~all-malignant
+    pos_rate = (prob_np[:, None] >= thr[None, :]).mean(
+        axis=0)  # predicted positive fraction
+    mask = (pos_rate >= min_pos_rate) & (pos_rate <= max_pos_rate)
+    if mask.any():
+        idx = mask.nonzero()[0][j[mask].argmax()]
+    else:
+        idx = j.argmax()  # fallback
+    return float(thr[idx])
 
 
 @torch.no_grad()
@@ -165,45 +200,70 @@ def main():
     # models
     siam, clf = load_models(device, args.siamese, args.classifier)
 
-    # --- VALIDATION: choose threshold ---
+    # --- VALIDATION: choose threshold (balanced) ---
     print("[VALIDATION] started")
     v_probs, _, v_labels = predict_loader(
         siam, clf, val_loader, device, tta=args.tta)
-    val_auc = roc_auc_score(v_labels, v_probs)
-    fpr, tpr, thr = roc_curve(v_labels, v_probs)
-    j = tpr - fpr
-    t_star = thr[np.argmax(j)]
-    val_acc_05 = ((v_probs >= 0.5).astype(int) == v_labels).mean()
-    val_acc_ts = ((v_probs >= t_star).astype(int) == v_labels).mean()
+    t_star = pick_threshold_balanced(
+        v_labels, v_probs, min_pos_rate=0.05, max_pos_rate=0.95)
+
+    # report proper metrics
+    from sklearn.metrics import roc_auc_score, confusion_matrix
+    val_auc = roc_auc_score(v_labels, v_probs.astype(np.float32))
+    v_pred = (v_probs >= t_star).astype(int)
+    cm = confusion_matrix(v_labels, v_pred, labels=[0, 1])
+    tn, fp, fn, tp = cm.ravel()
+    sens = tp / max(1, tp+fn)  # TPR
+    spec = tn / max(1, tn+fp)  # TNR
+    bal_acc = 0.5*(sens+spec)
+    acc = (v_pred == v_labels).mean()
     print(
-        f"[VALIDATION] auc_roc={val_auc:.3f} | accuracy@0.5={val_acc_05:.3f} | accuracy@t*={val_acc_ts:.3f} | t*={t_star:.3f}")
+        f"[VALIDATION] auc_roc={val_auc:.3f} | t*={t_star:.3f} | acc={acc:.3f} | bal_acc={bal_acc:.3f} | sens={sens:.3f} | spec={spec:.3f}")
     print("[VALIDATION] finished")
 
-    # --- TEST: evaluate ---
+    # --- TEST with the same t* ---
     print("[TEST] started")
     t_probs, _, t_labels = predict_loader(
         siam, clf, test_loader, device, tta=args.tta)
-    test_auc = roc_auc_score(t_labels, t_probs)
-    preds_05 = (t_probs >= 0.5).astype(int)
-    preds_ts = (t_probs >= t_star).astype(int)
-    acc_05 = (preds_05 == t_labels).mean()
-    acc_ts = (preds_ts == t_labels).mean()
+    t_pred = (t_probs >= t_star).astype(int)
+    from sklearn.metrics import roc_auc_score
+    test_auc = roc_auc_score(t_labels, t_probs.astype(np.float32))
+    cm = confusion_matrix(t_labels, t_pred, labels=[0, 1])
+    tn, fp, fn, tp = cm.ravel()
+    sens = tp / max(1, tp+fn)
+    spec = tn / max(1, tn+fp)
+    bal_acc = 0.5*(sens+spec)
+    acc = (t_pred == t_labels).mean()
     print(
-        f"[TEST] auc_roc={test_auc:.3f} | accuracy@0.5={acc_05:.3f} | accuracy@t*={acc_ts:.3f}")
+        f"[TEST] auc_roc={test_auc:.3f} | acc={acc:.3f} | bal_acc={bal_acc:.3f} | sens={sens:.3f} | spec={spec:.3f}")
 
-    # plots (only what you want)
-    cm05 = os.path.join(config.ARTIFACTS, "confusion_matrix_test_05.png")
-    cmts = os.path.join(config.ARTIFACTS, "confusion_matrix_test_tstar.png")
+    # plots at chosen threshold + ROC
+    from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay, RocCurveDisplay, roc_auc_score
+    import matplotlib.pyplot as plt
+
     roc_p = os.path.join(config.ARTIFACTS, "roc_curve_test.png")
+    cm_best = os.path.join(config.ARTIFACTS, "confusion_matrix_test_best.png")
 
-    plot_confmat(t_labels, preds_05, cm05,
-                 title="Confusion Matrix (test, thr=0.5)")
-    plot_confmat(t_labels, preds_ts, cmts,
-                 title=f"Confusion Matrix (test, thr={t_star:.2f})")
-    plot_roc(t_labels, t_probs, roc_p)
+    cm = confusion_matrix(t_labels, (t_probs >= t_star).astype(int))
+    fig, ax = plt.subplots()
+    ConfusionMatrixDisplay(cm, display_labels=["Benign", "Malignant"]).plot(
+        ax=ax, colorbar=False)
+    ax.set_title(f"Confusion Matrix (test, thr={t_star:.3f})")
+    plt.tight_layout()
+    plt.savefig(cm_best, dpi=150)
+    plt.close()
+
+    auc = roc_auc_score(t_labels, t_probs.astype(np.float32))
+    fig, ax = plt.subplots()
+    RocCurveDisplay.from_predictions(
+        t_labels, t_probs, ax=ax, name=f"AUC={auc:.3f}")
+    ax.set_title("ROC (test)")
+    plt.tight_layout()
+    plt.savefig(roc_p, dpi=150)
+    plt.close()
 
     print("[PREDICT] saved:")
-    for p in [cm05, cmts, roc_p]:
+    for p in [cm_best, roc_p]:
         if os.path.exists(p):
             print("  -", p)
 
