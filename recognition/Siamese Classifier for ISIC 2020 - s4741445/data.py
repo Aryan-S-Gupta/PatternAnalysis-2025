@@ -1,6 +1,8 @@
 import os
 import random
 import glob
+import time
+import concurrent.futures
 from typing import Optional, List, Dict
 from collections import defaultdict
 
@@ -16,14 +18,18 @@ import config
 
 
 def _build_transforms(train: bool) -> v2.Compose:
+    # keep your original augmentation choices
     aug = [
         v2.RandomHorizontalFlip(),
         v2.RandomVerticalFlip(p=0.2),
-        v2.RandomRotation(12),
-        v2.ColorJitter(0.15, 0.15, 0.10, 0.05),
-        v2.RandomResizedCrop(
-            (config.IMAGE_SIZE, config.IMAGE_SIZE), scale=(0.85, 1.0)),
+        v2.RandomRotation(12 if train else 0),
     ]
+    if train:
+        aug += [
+            v2.ColorJitter(0.15, 0.15, 0.10, 0.05),
+            v2.RandomResizedCrop(
+                (config.IMAGE_SIZE, config.IMAGE_SIZE), scale=(0.85, 1.0)),
+        ]
     common = [
         v2.ToImage(),
         v2.Resize((config.IMAGE_SIZE, config.IMAGE_SIZE), antialias=True),
@@ -31,6 +37,10 @@ def _build_transforms(train: bool) -> v2.Compose:
         v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ]
     return v2.Compose((aug if train else []) + common)
+
+
+# Only .jpg per your requirement
+_EXTS = (".jpg",)
 
 
 def _resolve_path(images_dir: str, stem: str) -> Optional[str]:
@@ -60,11 +70,11 @@ def _stratified_split(df, val_frac, test_frac, seed):
         idxs = list(g.index)
         rng.shuffle(idxs)
         n = len(idxs)
-        n_test = int(round(test_frac * n))
-        n_val = int(round(val_frac * n))
+        n_test = int(round(test_frac*n))
+        n_val = int(round(val_frac*n))
         test_idx = idxs[:n_test]
-        val_idx = idxs[n_test:n_test + n_val]
-        train_idx = idxs[n_test + n_val:]
+        val_idx = idxs[n_test:n_test+n_val]
+        train_idx = idxs[n_test+n_val:]
         parts += [("train", g.loc[train_idx]),
                   ("val", g.loc[val_idx]), ("test", g.loc[test_idx])]
     train = pd.concat([p for k, p in parts if k == "train"]
@@ -83,11 +93,11 @@ def _grouped_split(df, group_col, val_frac, test_frac, seed):
         groups = list(g[group_col].dropna().astype(str).unique())
         rng.shuffle(groups)
         n = len(groups)
-        n_test = int(round(test_frac * n))
-        n_val = int(round(val_frac * n))
+        n_test = int(round(test_frac*n))
+        n_val = int(round(val_frac*n))
         test_g = set(groups[:n_test])
-        val_g = set(groups[n_test:n_test + n_val])
-        train_g = set(groups[n_test + n_val:])
+        val_g = set(groups[n_test:n_test+n_val])
+        train_g = set(groups[n_test+n_val:])
         train = g[g[group_col].astype(str).isin(train_g)]
         val = g[g[group_col].astype(str).isin(val_g)]
         test = g[g[group_col].astype(str).isin(test_g)]
@@ -99,6 +109,22 @@ def _grouped_split(df, group_col, val_frac, test_frac, seed):
     test = pd.concat([p for k, p in parts if k == "test"]
                      ).sample(frac=1, random_state=seed)
     return train.reset_index(drop=True), val.reset_index(drop=True), test.reset_index(drop=True)
+
+# ---------- fast disk existence filter (parallel, .jpg only) ----------
+
+
+def _filter_ids_by_disk(images_dir: str, df: pd.DataFrame, max_workers: int = 32) -> pd.DataFrame:
+    ids = df["isic_id"].astype(str).tolist()
+    t0 = time.time()
+
+    def _exists(stem: str) -> bool:
+        return os.path.exists(os.path.join(images_dir, stem + ".jpg"))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as ex:
+        keep_mask = list(ex.map(_exists, ids))
+    kept = df.loc[keep_mask].reset_index(drop=True)
+    print(
+        f"[data] disk-exists filter (.jpg): {len(kept)}/{len(df)} keep (took {time.time()-t0:.2f}s)")
+    return kept
 
 # ---------- datasets ----------
 
@@ -152,19 +178,17 @@ class ISICTriplet(Dataset):
         pos_pool = self.class_to_indices[ya]
         pos_idx = idx
         if len(pos_pool) > 1:
-            import random as _r
             while pos_idx == idx:
-                pos_idx = _r.choice(pos_pool)
+                pos_idx = random.choice(pos_pool)
         xp, _ = self._load(pos_idx)
         yn = 1 - ya
-        import random as _r
-        neg_idx = _r.choice(self.class_to_indices[yn])
+        neg_idx = random.choice(self.class_to_indices[yn])
         xn, _ = self._load(neg_idx)
         return xa, xp, xn, torch.tensor(ya, dtype=torch.long)
 
 
 class BalancedAnchorBatchSampler(BatchSampler):
-    """Balanced anchors per class; with-replacement; covers dataset approx once/epoch."""
+    """Balanced anchors per class; with-replacement; epoch size = len(self)."""
 
     def __init__(self, dataset: ISICTriplet, batch_size: int, seed: int = 42):
         self.dataset = dataset
@@ -174,11 +198,9 @@ class BalancedAnchorBatchSampler(BatchSampler):
         self.c1 = dataset.class_to_indices[1][:]
         self.k0 = self.bs // 2
         self.k1 = self.bs - self.k0
-        # number of batches that roughly covers the minority class once
-        self.n_batches = max(1, min(
-            len(self.c0) // max(1, self.k0),
-            len(self.c1) // max(1, self.k1)
-        ))
+        # batches per epoch: min balanced
+        self.n_batches = max(1, min(len(self.c0), len(
+            self.c1)) // max(1, min(self.k0, self.k1)))
 
     def __iter__(self):
         for _ in range(self.n_batches):
@@ -192,29 +214,24 @@ class BalancedAnchorBatchSampler(BatchSampler):
 
     def __len__(self): return self.n_batches
 
-# ---------- loaders ----------
-
 
 def _dl_kwargs():
-    numw = int(getattr(config, "NUM_WORKERS", 0))
+    numw = int(getattr(config, "NUM_WORKERS", 4))
     kw = dict(num_workers=numw, pin_memory=True)
     if numw > 0:
         kw["persistent_workers"] = True
-        kw["prefetch_factor"] = 2
+        kw["prefetch_factor"] = 4
     return kw
 
 
 def make_loaders():
     df = _read_metadata(config.META_CSV)
 
-    # Filter rows to only those images that actually exist in IMAGES_DIR
-    stems = set()
-    for pat in ("*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff"):
-        stems |= {os.path.splitext(os.path.basename(p))[0]
-                  for p in glob.glob(os.path.join(config.IMAGES_DIR, pat))}
+    # Fast, parallel, .jpg-only presence check (no glob crawl)
     before = len(df)
-    df = df[df["isic_id"].isin(stems)].reset_index(drop=True)
-    print(f"[data] kept {len(df)}/{before} rows with existing files")
+    df = _filter_ids_by_disk(config.IMAGES_DIR, df, max_workers=32)
+    if len(df) == 0:
+        raise RuntimeError("No matching .jpg files found for entries in CSV.")
 
     if config.USE_PATIENT_SPLIT and "patient_id" in df.columns:
         train_df, val_df, test_df = _grouped_split(
@@ -249,6 +266,7 @@ def make_triplet_loaders_from_splits(train_df, val_df):
         **dlkw
     )
 
+    # validation sampler sized by minority class (robust & quick)
     n0 = len(val_tri.class_to_indices[0])
     n1 = len(val_tri.class_to_indices[1])
     minority = max(1, min(n0, n1))
