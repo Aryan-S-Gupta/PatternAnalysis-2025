@@ -68,6 +68,10 @@ def accuracy(clf, X, y, device):
 
 
 def plot_confusion_matrix(y_true, y_pred, labels, out_path):
+    if torch.is_tensor(y_true):
+        y_true = y_true.detach().cpu().numpy()
+    if torch.is_tensor(y_pred):
+        y_pred = y_pred.detach().cpu().numpy()
     cm = confusion_matrix(y_true, y_pred)
     disp = ConfusionMatrixDisplay(cm, display_labels=labels)
     fig, ax = plt.subplots()
@@ -79,6 +83,17 @@ def plot_confusion_matrix(y_true, y_pred, labels, out_path):
 
 
 def plot_roc_curve(y_true, y_score, out_path):
+    # --- NEW: force proper dtypes ---
+    if torch.is_tensor(y_true):
+        y_true = y_true.detach().cpu().numpy()
+    else:
+        y_true = np.asarray(y_true)
+    if torch.is_tensor(y_score):
+        y_score = y_score.detach().cpu().to(torch.float32).numpy()
+    else:
+        y_score = np.asarray(y_score, dtype=np.float32)
+    # ---------------------------------
+
     auc = roc_auc_score(y_true, y_score)
     fig, ax = plt.subplots()
     RocCurveDisplay.from_predictions(
