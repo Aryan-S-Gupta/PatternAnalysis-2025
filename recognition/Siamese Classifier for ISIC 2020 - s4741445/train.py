@@ -1,26 +1,27 @@
 import os
 import random
-import numpy as np
 import torch
-import matplotlib.pyplot as plt
-from PIL import Image
+import config
+import numpy as np
 from torch import nn
+from PIL import Image
 from torch.optim import Adam
-from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
-from torch.utils.data import DataLoader, TensorDataset
-from sklearn.metrics import roc_auc_score
+import matplotlib.pyplot as plt
 from sklearn.manifold import TSNE
+from torch.utils.data import Subset
 from torchvision.transforms import v2
 from sklearn.decomposition import PCA
-from torch.utils.data import Subset
-import config
-from data import make_loaders, make_triplet_loaders_from_splits
+from sklearn.metrics import roc_auc_score
+from torch.utils.data import DataLoader, TensorDataset
 from modules import SiameseTriplet, HeadBinaryClassifier
+from data import make_loaders, make_triplet_loaders_from_splits
+from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 from utils import (
     set_seed, plot_curves, accuracy, plot_confusion_matrix,
     plot_roc_curve, plot_curve
 )
 
+# Torch settings
 torch.backends.cudnn.benchmark = True
 try:
     torch.set_float32_matmul_precision("high")  # TF32 on Ampere+
@@ -30,12 +31,11 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
 
-# --- helpers (local) ---
-
+# distance between cosine-normalized vectors
 def d_cos_pair(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return 1.0 - (a * b).sum(dim=1).clamp(-1, 1)
 
-
+# supervised contrastive loss
 def supcon_loss(z: torch.Tensor, y: torch.Tensor, tau: float = 0.07) -> torch.Tensor:
     z = nn.functional.normalize(z, dim=1)
     sim = z @ z.t() / tau
@@ -49,7 +49,7 @@ def supcon_loss(z: torch.Tensor, y: torch.Tensor, tau: float = 0.07) -> torch.Te
     loss = -(pos_mask * log_prob).sum(1) / pos_count
     return loss.mean()
 
-
+# Exponential Moving Average (EMA) model wrapper
 class EMA:
     def __init__(self, model, decay=0.995):
         self.decay = float(decay)
@@ -71,7 +71,7 @@ class EMA:
     def load_into(self, model):
         model.load_state_dict(self.shadow, strict=True)
 
-
+# Pick threshold maximizing accuracy
 def pick_threshold_max_accuracy(y, p, steps=400):
     y = np.asarray(y)
     p = np.asarray(p)
@@ -80,7 +80,7 @@ def pick_threshold_max_accuracy(y, p, steps=400):
     acc, t_star = max(accs, key=lambda x: x[0])
     return float(t_star), float(acc)
 
-
+# Cache embeddings for all data in a loader
 @torch.no_grad()
 def cache_embeddings(siam: SiameseTriplet, loader: DataLoader, device, autocast_kwargs):
     X, y = [], []
@@ -94,19 +94,17 @@ def cache_embeddings(siam: SiameseTriplet, loader: DataLoader, device, autocast_
         y.append(yb)
     return torch.cat(X, 0), torch.cat(y, 0)
 
-# --- NEW: viz helpers (self-contained; no changes needed in utils.py) ---
-
-
+# Denormalization constants
 _IMAGENET_MEAN = np.array([0.485, 0.456, 0.406])[None, None, :]
 _IMAGENET_STD = np.array([0.229, 0.224, 0.225])[None, None, :]
 
-
+# Denormalize a batch of images
 def _denorm_batch(x: torch.Tensor) -> np.ndarray:
     x = x.detach().cpu().permute(0, 2, 3, 1).numpy()
     x = x * _IMAGENET_STD + _IMAGENET_MEAN
     return np.clip(x, 0, 1)
 
-
+# Plot a grid of images with labels
 def plot_image_grid(xb: torch.Tensor, labels: torch.Tensor, out_path: str, title: str, cols: int = 8):
     imgs = _denorm_batch(xb)
     n = imgs.shape[0]
@@ -132,14 +130,14 @@ def plot_image_grid(xb: torch.Tensor, labels: torch.Tensor, out_path: str, title
 # map ints → human labels
 _LABELS = {0: "Benign", 1: "Malignant"}
 
-
+# Convert tensor batch to numpy for display
 def _to_numpy_for_display(x: torch.Tensor, denorm: bool) -> np.ndarray:
     arr = x.detach().cpu().permute(0, 2, 3, 1).numpy()
     if denorm:
         arr = arr * _IMAGENET_STD + _IMAGENET_MEAN
     return np.clip(arr, 0, 1)
 
-
+# Plot a grid of images with class names
 def plot_image_grid_with_names(xb: torch.Tensor, labels: torch.Tensor, out_path: str,
                                title: str, cols: int = 8, denorm: bool = True):
     imgs = _to_numpy_for_display(xb, denorm=denorm)
@@ -160,7 +158,7 @@ def plot_image_grid_with_names(xb: torch.Tensor, labels: torch.Tensor, out_path:
     plt.savefig(out_path, dpi=140)
     plt.close()
 
-
+# Plot a grid of predictions with probabilities
 def plot_prediction_grid(xb: torch.Tensor, yb: torch.Tensor, probs: torch.Tensor, preds: torch.Tensor,
                          out_path: str, title: str = "Predictions", cols: int = 8):
     imgs = _denorm_batch(xb)
@@ -188,7 +186,7 @@ def plot_prediction_grid(xb: torch.Tensor, yb: torch.Tensor, probs: torch.Tensor
     plt.savefig(out_path, dpi=140)
     plt.close()
 
-
+# 2D scatter plot of features (t-SNE or PCA)
 def plot_feature_scatter_2d(X: torch.Tensor, y: torch.Tensor, out_path: str,
                             title: str = "Feature scatter (t-SNE)",
                             max_points: int = 2000, method: str = "tsne"):
@@ -225,7 +223,7 @@ def plot_feature_scatter_2d(X: torch.Tensor, y: torch.Tensor, out_path: str,
     plt.savefig(out_path, dpi=140)
     plt.close()
 
-
+# Training function
 def train():
     set_seed(config.SEED)
     use_cuda = torch.cuda.is_available()
@@ -235,7 +233,7 @@ def train():
 
     os.makedirs(config.ARTIFACTS, exist_ok=True)
 
-    # ---- loaders ----
+    # loaders
     base_tr, base_va, base_te, (train_df, val_df, test_df) = make_loaders()
     tri_tr, tri_va = make_triplet_loaders_from_splits(train_df, val_df)
 
@@ -245,9 +243,7 @@ def train():
     print(
         f"[DATA] warmup batch: {tuple(xb.shape)}, labels sample={yb[:4].tolist()}", flush=True)
 
-    # --- NEW: sample image grids before/after augmentation ---
-    # eval-style transform (no aug)
-    # --- NORMALIZATION COMPARISON GRIDS (before vs after) ---
+    # visualize normalization
     no_norm_tfm = v2.Compose([
         v2.ToImage(),
         v2.Resize((config.IMAGE_SIZE, config.IMAGE_SIZE), antialias=True),
@@ -285,7 +281,7 @@ def train():
         "After normalization (Benign/Malignant labels)", cols=8, denorm=False
     )
 
-    # ---- models ----
+    # Models
     siam = SiameseTriplet().to(device).to(memory_format=torch.channels_last)
     clf_aux = HeadBinaryClassifier().to(device)
 
@@ -346,7 +342,7 @@ def train():
         t = (ep - 1) / max(1, (config.EPOCHS_SIAMESE - 1))
         margin = margin_start + t * (margin_end - margin_start)
 
-        # ---- train step ----
+        # train step
         siam.train()
         clf_aux.train()
         tl = []
@@ -422,7 +418,7 @@ def train():
             except Exception:
                 s1_tr_auc.append(0.5)
 
-        # --- mid-epoch validation peek (few batches, EMA) ---
+        #  mid-epoch validation peek (few batches, EMA) 
         siam_eval = SiameseTriplet().to(device).to(memory_format=torch.channels_last)
         ema_siam.load_into(siam_eval)
         clf_eval = HeadBinaryClassifier().to(device)
@@ -461,7 +457,7 @@ def train():
             print(
                 f"[S1][val-peek] ep {ep}/{config.EPOCHS_SIAMESE} loss~ {np.mean(peek_losses):.4f} (first {VAL_PEEK_STEPS} batches)", flush=True)
 
-        # ---- full validation on EMA ----
+        # full validation on EMA
         print("[VALIDATION:S1] started")
         siam_eval = SiameseTriplet().to(device).to(memory_format=torch.channels_last)
         ema_siam.load_into(siam_eval)
@@ -561,7 +557,7 @@ def train():
         plot_curve(s1_va_acc, "Classification - validation (Siamese)",
                    config.ARTIFACTS, "siamese_classification_val.png", smooth_k=smooth_k, ylabel="accuracy")
 
-    # ---- Stage 2: cached embeddings + classifier ----
+    # Stage 2: cached embeddings + classifier
     print("[TRAIN:S2] started (classifier on cached embeddings)")
     siam = SiameseTriplet().to(device).to(memory_format=torch.channels_last)
     siam.load_state_dict(torch.load(os.path.join(
@@ -572,7 +568,7 @@ def train():
     Xte, yte = cache_embeddings(siam, base_te, device, autocast_kwargs)
     print(f"[S2] cached: train={len(Xtr)} val={len(Xva)} test={len(Xte)}")
 
-    # --- NEW: t-SNE scatter on TRAIN embeddings ---
+    #  t-SNE scatter on TRAIN embeddings 
     plot_feature_scatter_2d(Xtr, ytr, os.path.join(config.ARTIFACTS, "tsne_train_embeddings.png"),
                             title="Train embeddings (t-SNE)", max_points=2000)
 
@@ -631,7 +627,6 @@ def train():
         trL.append(float(np.mean(tl)))
         p = torch.cat(probs).numpy()
         y = torch.cat(ys).numpy()
-        # FIXED: real accuracy
         trA.append(((p >= 0.5).astype(int) == y).mean())
         try:
             trU.append(roc_auc_score(y, p))
@@ -654,7 +649,6 @@ def train():
         vaL.append(float(np.mean(vl)))
         p = torch.cat(probs).numpy()
         y = torch.cat(ys).numpy()
-        # FIXED: real accuracy
         vaA.append(((p >= 0.5).astype(int) == y).mean())
         try:
             vaU.append(roc_auc_score(y, p))
@@ -682,7 +676,7 @@ def train():
         plot_curves(trL, vaL, "Binary Classification Loss (train vs val)",
                     config.ARTIFACTS, "binary_classification_loss.png", smooth_k=smooth_k)
 
-    # ---- test ----
+    # test
     print("[TEST] started")
     clf.eval()
     with torch.no_grad():
@@ -697,7 +691,7 @@ def train():
     acc_t = (preds_t == yte.numpy()).mean()
     print(f"[TEST] acc@t* ({t:.3f}) = {acc_t:.3f}")
 
-    # --- NEW: prediction grid on first K original test images (eval tfm) ---
+    # prediction grid on first K original test images (eval tfm) 
     K = min(64, len(base_te.dataset))
     indices = random.sample(range(len(base_te.dataset)), k=K)
     subset = Subset(base_te.dataset, indices)
@@ -716,7 +710,6 @@ def train():
                          title="Test predictions (first batch)")
 
     if config.SAVE_PLOTS:
-        # NOTE: plot_confusion_matrix now supports colorbar if you updated utils; if not, it still works.
         plot_confusion_matrix(yte.cpu(), preds, ["Benign", "Malignant"],
                               os.path.join(config.ARTIFACTS, "confusion_matrix.png"))
         plot_confusion_matrix(yte.cpu(), torch.tensor(preds_t), ["Benign", "Malignant"],
