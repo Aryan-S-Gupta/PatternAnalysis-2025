@@ -1,11 +1,17 @@
 import os
+import random
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
+from PIL import Image
 from torch import nn
 from torch.optim import Adam
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.metrics import roc_auc_score
+from sklearn.manifold import TSNE
+from torchvision.transforms import v2
+from sklearn.decomposition import PCA
 
 import config
 from data import make_loaders, make_triplet_loaders_from_splits
@@ -24,7 +30,7 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
 
-# --- helpers ---
+# --- helpers (local) ---
 
 def d_cos_pair(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return 1.0 - (a * b).sum(dim=1).clamp(-1, 1)
@@ -66,6 +72,15 @@ class EMA:
         model.load_state_dict(self.shadow, strict=True)
 
 
+def pick_threshold_max_accuracy(y, p, steps=400):
+    y = np.asarray(y)
+    p = np.asarray(p)
+    ts = np.linspace(0.0, 1.0, steps)
+    accs = [(((p >= t).astype(int) == y).mean(), t) for t in ts]
+    acc, t_star = max(accs, key=lambda x: x[0])
+    return float(t_star), float(acc)
+
+
 @torch.no_grad()
 def cache_embeddings(siam: SiameseTriplet, loader: DataLoader, device, autocast_kwargs):
     X, y = [], []
@@ -78,6 +93,137 @@ def cache_embeddings(siam: SiameseTriplet, loader: DataLoader, device, autocast_
         X.append(z.cpu())
         y.append(yb)
     return torch.cat(X, 0), torch.cat(y, 0)
+
+# --- NEW: viz helpers (self-contained; no changes needed in utils.py) ---
+
+
+_IMAGENET_MEAN = np.array([0.485, 0.456, 0.406])[None, None, :]
+_IMAGENET_STD = np.array([0.229, 0.224, 0.225])[None, None, :]
+
+
+def _denorm_batch(x: torch.Tensor) -> np.ndarray:
+    x = x.detach().cpu().permute(0, 2, 3, 1).numpy()
+    x = x * _IMAGENET_STD + _IMAGENET_MEAN
+    return np.clip(x, 0, 1)
+
+
+def plot_image_grid(xb: torch.Tensor, labels: torch.Tensor, out_path: str, title: str, cols: int = 8):
+    imgs = _denorm_batch(xb)
+    n = imgs.shape[0]
+    cols = min(cols, n)
+    rows = int(np.ceil(n/cols))
+    fig, axes = plt.subplots(rows, cols, figsize=(cols*2, rows*2))
+    axes = np.atleast_2d(axes)
+    for i in range(rows*cols):
+        ax = axes[i//cols, i % cols]
+        ax.axis("off")
+        if i < n:
+            ax.imshow(imgs[i])
+            if labels is not None:
+                y = int(labels[i]) if torch.is_tensor(
+                    labels) else int(labels[i])
+                ax.set_title(f"y={y}", fontsize=8)
+    fig.suptitle(title)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=140)
+    plt.close()
+
+
+# map ints → human labels
+_LABELS = {0: "Benign", 1: "Malignant"}
+
+
+def _to_numpy_for_display(x: torch.Tensor, denorm: bool) -> np.ndarray:
+    arr = x.detach().cpu().permute(0, 2, 3, 1).numpy()
+    if denorm:
+        arr = arr * _IMAGENET_STD + _IMAGENET_MEAN
+    return np.clip(arr, 0, 1)
+
+
+def plot_image_grid_with_names(xb: torch.Tensor, labels: torch.Tensor, out_path: str,
+                               title: str, cols: int = 8, denorm: bool = True):
+    imgs = _to_numpy_for_display(xb, denorm=denorm)
+    n = imgs.shape[0]
+    cols = min(cols, n)
+    rows = int(np.ceil(n/cols))
+    fig, axes = plt.subplots(rows, cols, figsize=(cols*2.2, rows*2.2))
+    axes = np.atleast_2d(axes)
+    for i in range(rows*cols):
+        ax = axes[i//cols, i % cols]
+        ax.axis("off")
+        if i < n:
+            ax.imshow(imgs[i])
+            y = int(labels[i]) if torch.is_tensor(labels) else int(labels[i])
+            ax.set_title(_LABELS.get(y, str(y)), fontsize=9)
+    fig.suptitle(title)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=140)
+    plt.close()
+
+
+def plot_prediction_grid(xb: torch.Tensor, yb: torch.Tensor, probs: torch.Tensor, preds: torch.Tensor,
+                         out_path: str, title: str = "Predictions", cols: int = 8):
+    imgs = _denorm_batch(xb)
+    n = imgs.shape[0]
+    cols = min(cols, n)
+    rows = int(np.ceil(n/cols))
+    fig, axes = plt.subplots(rows, cols, figsize=(cols*2.2, rows*2.2))
+    axes = np.atleast_2d(axes)
+    for i in range(rows*cols):
+        ax = axes[i//cols, i % cols]
+        ax.axis("off")
+        if i < n:
+            ax.imshow(imgs[i])
+            y = int(yb[i])
+            pr = int(preds[i])
+            p = float(probs[i])
+            ok = (y == pr)
+            ax.set_title(f"{_LABELS.get(y, y)} → {_LABELS.get(pr, pr)}  p1={p:.2f}",
+                         fontsize=8, color=("green" if ok else "red"))
+            for spine in ax.spines.values():
+                spine.set_edgecolor("green" if ok else "red")
+                spine.set_linewidth(2.0)
+    fig.suptitle(title)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=140)
+    plt.close()
+
+
+def plot_feature_scatter_2d(X: torch.Tensor, y: torch.Tensor, out_path: str,
+                            title: str = "Feature scatter (t-SNE)",
+                            max_points: int = 2000, method: str = "tsne"):
+    Xn = X.detach().cpu().numpy()
+    yn = y.detach().cpu().numpy()
+
+    # stratified subsample for speed
+    if len(Xn) > max_points:
+        keep_idx = []
+        for cls in np.unique(yn):
+            idx = np.where(yn == cls)[0]
+            k = max(1, int(max_points * (len(idx) / len(Xn))))
+            keep_idx.append(np.random.choice(idx, size=k, replace=False))
+        keep_idx = np.concatenate(keep_idx)
+        Xn, yn = Xn[keep_idx], yn[keep_idx]
+
+    # speed up with PCA pre-reduction
+    X50 = PCA(n_components=min(50, Xn.shape[1])).fit_transform(Xn)
+
+    if method == "pca":
+        Z = PCA(n_components=2).fit_transform(Xn)  # fastest
+    else:
+        tsne = TSNE(n_components=2, init="pca", learning_rate="auto",
+                    perplexity=30, max_iter=750, random_state=42)
+        Z = tsne.fit_transform(X50)
+
+    plt.figure(figsize=(6, 5))
+    for cls, name in [(0, "Benign"), (1, "Malignant")]:
+        m = (yn == cls)
+        plt.scatter(Z[m, 0], Z[m, 1], s=6, alpha=0.65, label=name)
+    plt.legend()
+    plt.title(title)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=140)
+    plt.close()
 
 
 def train():
@@ -99,18 +245,51 @@ def train():
     print(
         f"[DATA] warmup batch: {tuple(xb.shape)}, labels sample={yb[:4].tolist()}", flush=True)
 
+    # --- NEW: sample image grids before/after augmentation ---
+    # eval-style transform (no aug)
+    # --- NORMALIZATION COMPARISON GRIDS (before vs after) ---
+    no_norm_tfm = v2.Compose([
+        v2.ToImage(),
+        v2.Resize((config.IMAGE_SIZE, config.IMAGE_SIZE), antialias=True),
+        v2.ToDtype(torch.float32, scale=True),
+    ])
+    norm_tfm = v2.Compose([
+        v2.ToImage(),
+        v2.Resize((config.IMAGE_SIZE, config.IMAGE_SIZE), antialias=True),
+        v2.ToDtype(torch.float32, scale=True),
+        v2.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+    ])
+
+    N = min(24, len(base_tr.dataset.paths))
+    idxs = random.sample(range(len(base_tr.dataset.paths)), k=N)
+    x_before, x_after, y_batch = [], [], []
+    for i in idxs:
+        p = base_tr.dataset.paths[i]
+        y = base_tr.dataset.labels[i]
+        img = Image.open(p).convert("RGB")
+        x_before.append(no_norm_tfm(img))  # BEFORE normalization
+        x_after.append(norm_tfm(img))      # AFTER normalization
+        y_batch.append(y)
+    xb_before = torch.stack(x_before, 0)
+    xb_after = torch.stack(x_after,  0)
+    yb_batch = torch.tensor(y_batch, dtype=torch.long)
+
+    plot_image_grid_with_names(
+        xb_before, yb_batch,
+        os.path.join(config.ARTIFACTS, "grid_before_normalization.png"),
+        "Before normalization (Benign/Malignant labels)", cols=8, denorm=False
+    )
+    plot_image_grid_with_names(
+        xb_after, yb_batch,
+        os.path.join(config.ARTIFACTS, "grid_after_normalization.png"),
+        "After normalization (Benign/Malignant labels)", cols=8, denorm=False
+    )
+
     # ---- models ----
     siam = SiameseTriplet().to(device).to(memory_format=torch.channels_last)
     clf_aux = HeadBinaryClassifier().to(device)
 
-    # (Compile disabled on Colab to avoid first-run stalls)
-    # try:
-    #     siam = torch.compile(siam, mode="reduce-overhead", fullgraph=False)
-    #     clf_aux = torch.compile(clf_aux, mode="reduce-overhead", fullgraph=False)
-    # except Exception:
-    #     pass
-
-    # warmup freeze
+    # warmup freeze (S1)
     for p in siam.embed.backbone.parameters():
         p.requires_grad = False
 
@@ -237,7 +416,7 @@ def train():
         else:
             tr_p = torch.cat(probs).numpy()
             tr_y = torch.cat(ys).numpy()
-            s1_tr_acc.append((tr_p > 0.5).astype(int).mean())
+            s1_tr_acc.append(((tr_p > 0.5).astype(int) == tr_y).mean())
             try:
                 s1_tr_auc.append(roc_auc_score(tr_y, tr_p))
             except Exception:
@@ -334,7 +513,7 @@ def train():
         else:
             va_p = torch.cat(probs).numpy()
             va_y = torch.cat(ys).numpy()
-            s1_va_acc.append((va_p > 0.5).astype(int).mean())
+            s1_va_acc.append(((va_p > 0.5).astype(int) == va_y).mean())
             try:
                 s1_va_auc.append(roc_auc_score(va_y, va_p))
             except Exception:
@@ -379,8 +558,8 @@ def train():
                     config.ARTIFACTS, "siamese_loss.png", smooth_k=smooth_k)
         plot_curve(s1_tr_acc, "Classification - training (Siamese)",
                    config.ARTIFACTS, "siamese_classification_train.png", smooth_k=smooth_k, ylabel="accuracy")
-        plot_curve(s1_va_acc, "Classification - testing (Siamese)",
-                   config.ARTIFACTS, "siamese_classification_test.png", smooth_k=smooth_k, ylabel="accuracy")
+        plot_curve(s1_va_acc, "Classification - validation (Siamese)",
+                   config.ARTIFACTS, "siamese_classification_val.png", smooth_k=smooth_k, ylabel="accuracy")
 
     # ---- Stage 2: cached embeddings + classifier ----
     print("[TRAIN:S2] started (classifier on cached embeddings)")
@@ -393,7 +572,11 @@ def train():
     Xte, yte = cache_embeddings(siam, base_te, device, autocast_kwargs)
     print(f"[S2] cached: train={len(Xtr)} val={len(Xva)} test={len(Xte)}")
 
-    # Big batches (embeddings are small) and no workers (TensorDataset is RAM-resident)
+    # --- NEW: t-SNE scatter on TRAIN embeddings ---
+    plot_feature_scatter_2d(Xtr, ytr, os.path.join(config.ARTIFACTS, "tsne_train_embeddings.png"),
+                            title="Train embeddings (t-SNE)", max_points=2000)
+
+    # Big batches (embeddings are small)
     bs2 = min(2048, len(Xtr))
     tr = DataLoader(TensorDataset(Xtr, ytr), batch_size=bs2, shuffle=True,
                     pin_memory=True, num_workers=0)
@@ -412,6 +595,8 @@ def train():
     trL, vaL, trA, vaA, trU, vaU = [], [], [], [], [], []
     LOG_EVERY = 10
 
+    best_t_for_acc = 0.5
+
     for ep in range(1, config.EPOCHS_CLASSIFIER + 1):
         clf.train()
         tl = []
@@ -419,7 +604,7 @@ def train():
         ys = []
         running2 = {"loss": 0.0, "n": 0}
         for b_idx, (xb, yb) in enumerate(tr, start=1):
-            # 2D embeddings → no channels_last
+            # embeddings are 2D → no channels_last
             xb = xb.to(device, non_blocking=True)
             yb = yb.to(device, non_blocking=True)
             with torch.autocast(**autocast_kwargs):
@@ -446,6 +631,7 @@ def train():
         trL.append(float(np.mean(tl)))
         p = torch.cat(probs).numpy()
         y = torch.cat(ys).numpy()
+        # FIXED: real accuracy
         trA.append(((p >= 0.5).astype(int) == y).mean())
         try:
             trU.append(roc_auc_score(y, p))
@@ -468,11 +654,17 @@ def train():
         vaL.append(float(np.mean(vl)))
         p = torch.cat(probs).numpy()
         y = torch.cat(ys).numpy()
+        # FIXED: real accuracy
         vaA.append(((p >= 0.5).astype(int) == y).mean())
         try:
             vaU.append(roc_auc_score(y, p))
         except Exception:
             vaU.append(0.5)
+
+        t_star, vaAccStar = pick_threshold_max_accuracy(y, p, steps=400)
+        print(
+            f"[S2] best threshold on val for ACC: t*={t_star:.3f} | acc@t*={vaAccStar:.3f}")
+        best_t_for_acc = t_star
 
         prev_lr = opt.param_groups[0]['lr']
         plateau.step(vaU[-1])
@@ -495,14 +687,38 @@ def train():
     clf.eval()
     with torch.no_grad():
         with torch.autocast(**autocast_kwargs):
-            # 2D embeddings → keep contiguous
+            # embeddings are 2D
             logits = clf(Xte.to(device, non_blocking=True))
         probs = torch.softmax(logits, dim=1)[:, 1].to(torch.float32).cpu()
         preds = logits.argmax(1).cpu()
 
+    t = best_t_for_acc
+    preds_t = (probs.numpy() >= t).astype(int)
+    acc_t = (preds_t == yte.numpy()).mean()
+    print(f"[TEST] acc@t* ({t:.3f}) = {acc_t:.3f}")
+
+    # --- NEW: prediction grid on first K original test images (eval tfm) ---
+    K = min(32, len(base_te.dataset))
+    small_loader = DataLoader(base_te.dataset, batch_size=K, shuffle=False,
+                              num_workers=0, pin_memory=True)
+    xb_vis, yb_vis = next(iter(small_loader))
+    with torch.no_grad():
+        with torch.autocast(**autocast_kwargs):
+            z_vis = siam.forward_once(xb_vis.to(device, non_blocking=True))
+            logits_vis = clf(z_vis)
+            probs_vis = torch.softmax(logits_vis, dim=1)[:, 1].float().cpu()
+            preds_vis = logits_vis.argmax(1).cpu()
+    plot_prediction_grid(xb_vis, yb_vis, probs_vis, preds_vis,
+                         os.path.join(config.ARTIFACTS,
+                                      "prediction_grid_test.png"),
+                         title="Test predictions (first batch)")
+
     if config.SAVE_PLOTS:
+        # NOTE: plot_confusion_matrix now supports colorbar if you updated utils; if not, it still works.
         plot_confusion_matrix(yte.cpu(), preds, ["Benign", "Malignant"],
                               os.path.join(config.ARTIFACTS, "confusion_matrix.png"))
+        plot_confusion_matrix(yte.cpu(), torch.tensor(preds_t), ["Benign", "Malignant"],
+                              os.path.join(config.ARTIFACTS, "confusion_matrix_test_acc_tstar.png"))
         plot_roc_curve(yte.cpu(), probs, os.path.join(
             config.ARTIFACTS, "roc_curve.png"))
 
