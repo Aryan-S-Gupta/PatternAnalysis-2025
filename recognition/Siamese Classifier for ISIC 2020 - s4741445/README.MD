@@ -29,7 +29,7 @@ A **Siamese network** has two (or more) weight-sharing branches that map inputs 
 
 **Rough Pipeline:**
 
-![roadmap_diagram](images/Roadmap_Diagram.png)
+![roadmap_diagram](./images/Roadmap_Diagram.png)
 
 
 **Key idea:** first learn **good features**, then add a **simple decision layer**.
@@ -139,7 +139,7 @@ siamese_project/
 
 * **Siamese network loss**
 
-![Siamese\_Loss](images/siamese_loss.png)
+![Siamese\_Loss](./images/siamese_loss.png)
 
 Drops sharply from ≈4.2 to ≈0.6 within the first three epochs, then flattens around 0.5, showing fast convergence of the contrastive/triplet loss.
   This indicates that the embedding space quickly learned to separate positive and negative pairs, achieving consistent distances and stable optimisation in later epochs.
@@ -148,8 +148,8 @@ Drops sharply from ≈4.2 to ≈0.6 within the first three epochs, then flattens
 
 * **Training vs validation accuracy (Siamese)** 
 
-![Siamese_Train](images/siamese_classification_train.png)
-![Siamese_Val](images/siamese_classification_val.png)
+![Siamese_Train](./images/siamese_classification_train.png)
+![Siamese_Val](./images/siamese_classification_val.png)
 
 Both curves rise smoothly, with training accuracy approaching ≈0.9 and validation stabilising near ≈0.8 by epoch 12. The parallel growth without divergence demonstrates effective generalisation — the Siamese encoder learns useful, non-overfitted features despite the 55× class imbalance.
   
@@ -158,7 +158,7 @@ Both curves rise smoothly, with training accuracy approaching ≈0.9 and validat
 
 * **Binary classifier loss** 
 
-![Binary_Loss](images/binary_classification_loss.png)
+![Binary_Loss](./images/binary_classification_loss.png)
 
 Decreases steadily from ≈1.12 → 0.93 across 10 epochs, with the validation curve tracking closely behind training. This behaviour confirms that the cached embeddings are linearly separable and the classifier trains stably without overfitting or oscillations, ensuring reproducible convergence.
   
@@ -166,7 +166,7 @@ Decreases steadily from ≈1.12 → 0.93 across 10 epochs, with the validation c
 
 * **t-SNE embedding visualisation** 
 
-![TSNE](images/tsne_train_embeddings.png)
+![TSNE](./images/tsne_train_embeddings.png)
 
 2-D projection of the 256-D latent space; benign (blue) and malignant (orange) lesions form semi-distinct clusters. The partial separation verifies that the metric-learning objective succeeded — malignant samples lie on the edge of the benign manifold, showing discriminative but overlapping structure typical for medical imagery.
   
@@ -175,7 +175,7 @@ Decreases steadily from ≈1.12 → 0.93 across 10 epochs, with the validation c
 
 * **ROC curve**
 
-![ROC_Curve](images/ROC_Curve.png)
+![ROC_Curve](./images/ROC_Curve.png)
 
 AUC ≈ 0.90; a smooth convex curve trending toward (0, 1) illustrates strong ranking power and reliable probability calibration across thresholds. High AUC under extreme imbalance confirms that the learned embeddings and classifier maintain discriminative performance without collapsing to the majority class.
 
@@ -183,7 +183,7 @@ AUC ≈ 0.90; a smooth convex curve trending toward (0, 1) illustrates strong ra
 
 * **Confusion matrix (test, t = 0.717)**
 
-![Confusion_Matrix](images/confusion_matrix_test.png)
+![Confusion_Matrix](./images/confusion_matrix_test.png)
 
 Pronounced diagonal dominance with **TN = 4190, FP = 598, FN = 28, TP = 70**. At this threshold, the model achieves **Specificity ≈ 87.5 %** and **Sensitivity ≈ 71.4 %**, yielding **Balanced Accuracy ≈ 79.5 %**. This trade-off ensures melanoma cases are detected while minimising false alarms — optimal for screening scenarios. *(Higher-accuracy thresholds like t = 0.957 over-fit by predicting all benign.)*
   
