@@ -299,7 +299,22 @@ No personal or identifying information is present. Model outputs are **not diagn
 
 ---
 
-## 13. License & Submission
+## 13. References
+
+1. **ISIC 2020 Challenge Dataset** – SIIM-ISIC Melanoma Classification, *Kaggle Competition*,  
+   [https://www.kaggle.com/c/siim-isic-melanoma-classification](https://www.kaggle.com/c/siim-isic-melanoma-classification)
+
+2. **ResNet-50 Backbone** – He, K., Zhang, X., Ren, S., & Sun, J. (2016). *Deep Residual Learning for Image Recognition.*  
+   *CVPR 2016.* [https://arxiv.org/abs/1512.03385](https://arxiv.org/abs/1512.03385)
+
+3. **Supervised Contrastive Learning** – Khosla, P. et al. (2020). *Supervised Contrastive Learning.*  
+   *NeurIPS 2020.* [https://arxiv.org/abs/2004.11362](https://arxiv.org/abs/2004.11362)
+
+4. **Triplet Loss / FaceNet** – Schroff, F., Kalenichenko, D., & Philbin, J. (2015). *FaceNet: A Unified Embedding for Face Recognition and Clustering.*  
+   *CVPR 2015.* [https://arxiv.org/abs/1503.03832](https://arxiv.org/abs/1503.03832)
+---
+
+## 14. License & Submission
 
 Code and documentation © 2025 Aryan Somesh Gupta (s47414451).  
 Submitted as **COMP3710 / Pattern Analysis – Final Project**.  
