@@ -114,6 +114,11 @@ siamese_project/
 * **Why cache:** avoids re-encoding 23k+ images/epoch; cheaper and more reproducible.
 * **Saved:** `classifier.pt`, evaluation plots.
 
+> **No Data Leakage Notice:**  
+> Splits are performed **before** any caching or normalisation, and patient grouping is enforced (`USE_PATIENT_SPLIT=True`).  
+> Test data is never accessed during training.  
+> **TTA** (test-time augmentation) is applied **only** during evaluation.
+
 ---
 
 ## 6. Results
@@ -214,6 +219,10 @@ Pronounced diagonal dominance with **TN = 4190, FP = 598, FN = 28, TP = 70**. At
      --tta 4
    ```
 
+> `predict.py` serves as the primary "driver" for inference and metric evaluation. 
+> prints **AUC, Accuracy, Balanced Accuracy, Sensitivity, Specificity** and saves  
+> `ROC_Curve.png` and `confusion_matrix_test.png` in `/outputs/`.
+
 ### 7.2 Arguments
 
 * `--siamese` path to Stage-1 weights; `--classifier` path to Stage-2 head; `--tta {1,2,4,8}` (I use **4** as a good trade-off).
@@ -239,6 +248,9 @@ Install example:
 ```bash
 pip install torch torchvision pandas scikit-learn matplotlib pillow numpy
 ```
+
+> **Environment / Hardware:**  
+> Verified on **Google Colab A100 (40 GB)**, Python 3.10, PyTorch 2.2 + torchvision 0.17 (`transforms.v2`).
 
 **Reproducibility:** seeds fixed in code; patient-aware split (if `patient_id` available); Stage-2 uses **cached** embeddings to ensure stable results across runs.
 
@@ -278,5 +290,19 @@ pip install torch torchvision pandas scikit-learn matplotlib pillow numpy
 5. **Model Ensembling and SWA**
    Averaging predictions from multiple classifier heads or using **stochastic weight averaging** can stabilise decision boundaries and slightly boost test-time performance.
 
+---
+
+## 12. Ethics & Privacy
+
+Dermoscopic images used are **publicly released for academic research** (ISIC 2020).  
+No personal or identifying information is present. Model outputs are **not diagnostic**.
+
+---
+
+## 13. License & Submission
+
+Code and documentation © 2025 Aryan Somesh Gupta (s47414451).  
+Submitted as **COMP3710 / Pattern Analysis – Final Project**.  
+README exported to **PDF** and uploaded on BlackBoard.
 
 ---
