@@ -1,3 +1,9 @@
+"""
+Two-stage training for the ISIC 2020 Siamese classifier.
+Stage-1 learns embeddings with triplet/contrastive + aux CE; Stage-2 trains an MLP on cached embeddings.
+Made by Aryan Somesh Gupta (s47414451)
+"""
+
 import os
 import random
 import torch
@@ -33,10 +39,14 @@ torch.backends.cudnn.allow_tf32 = True
 
 # distance between cosine-normalized vectors
 def d_cos_pair(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """Cosine distance between L2-normalized vectors (1 − cosine similarity)."""
     return 1.0 - (a * b).sum(dim=1).clamp(-1, 1)
 
 # supervised contrastive loss
+
+
 def supcon_loss(z: torch.Tensor, y: torch.Tensor, tau: float = 0.07) -> torch.Tensor:
+    """Supervised contrastive loss over a batch using temperature `tau` and leave-one-out logits."""
     z = nn.functional.normalize(z, dim=1)
     sim = z @ z.t() / tau
     sim = sim - torch.eye(sim.size(0), device=sim.device) * 1e9
@@ -50,7 +60,11 @@ def supcon_loss(z: torch.Tensor, y: torch.Tensor, tau: float = 0.07) -> torch.Te
     return loss.mean()
 
 # Exponential Moving Average (EMA) model wrapper
+
+
 class EMA:
+    """Exponential Moving Average wrapper for model parameters."""
+
     def __init__(self, model, decay=0.995):
         self.decay = float(decay)
         self.shadow = {k: v.detach().clone()
@@ -58,6 +72,7 @@ class EMA:
 
     @torch.no_grad()
     def update(self, model):
+        """Update shadow weights toward the current model weights."""
         for k, v in model.state_dict().items():
             sv = self.shadow.get(k, None)
             if sv is None:
@@ -69,10 +84,14 @@ class EMA:
                 sv.copy_(v)
 
     def load_into(self, model):
+        """Copy shadow weights into `model` (strict)."""
         model.load_state_dict(self.shadow, strict=True)
 
 # Pick threshold maximizing accuracy
+
+
 def pick_threshold_max_accuracy(y, p, steps=400):
+    """Return `(t_star, acc_at_t)` for the probability threshold maximizing accuracy on labels `y`."""
     y = np.asarray(y)
     p = np.asarray(p)
     ts = np.linspace(0.0, 1.0, steps)
@@ -81,8 +100,13 @@ def pick_threshold_max_accuracy(y, p, steps=400):
     return float(t_star), float(acc)
 
 # Cache embeddings for all data in a loader
+
+
 @torch.no_grad()
 def cache_embeddings(siam: SiameseTriplet, loader: DataLoader, device, autocast_kwargs):
+    """Run `siam` over `loader` to cache embeddings and labels.
+    Uses autocast and channels_last for speed. Returns `(X, y)` tensors.
+    """
     X, y = [], []
     siam.eval()
     for xb, yb in loader:
@@ -94,18 +118,25 @@ def cache_embeddings(siam: SiameseTriplet, loader: DataLoader, device, autocast_
         y.append(yb)
     return torch.cat(X, 0), torch.cat(y, 0)
 
+
 # Denormalization constants
 _IMAGENET_MEAN = np.array([0.485, 0.456, 0.406])[None, None, :]
 _IMAGENET_STD = np.array([0.229, 0.224, 0.225])[None, None, :]
 
 # Denormalize a batch of images
+
+
 def _denorm_batch(x: torch.Tensor) -> np.ndarray:
+    """Convert a BCHW tensor batch to uint-range float HWC numpy with ImageNet de-norm."""
     x = x.detach().cpu().permute(0, 2, 3, 1).numpy()
     x = x * _IMAGENET_STD + _IMAGENET_MEAN
     return np.clip(x, 0, 1)
 
 # Plot a grid of images with labels
+
+
 def plot_image_grid(xb: torch.Tensor, labels: torch.Tensor, out_path: str, title: str, cols: int = 8):
+    """Save a grid of images (optionally with numeric labels) to `out_path`."""
     imgs = _denorm_batch(xb)
     n = imgs.shape[0]
     cols = min(cols, n)
@@ -131,15 +162,21 @@ def plot_image_grid(xb: torch.Tensor, labels: torch.Tensor, out_path: str, title
 _LABELS = {0: "Benign", 1: "Malignant"}
 
 # Convert tensor batch to numpy for display
+
+
 def _to_numpy_for_display(x: torch.Tensor, denorm: bool) -> np.ndarray:
+    """Helper: convert a BCHW tensor batch to HWC numpy for visualization."""
     arr = x.detach().cpu().permute(0, 2, 3, 1).numpy()
     if denorm:
         arr = arr * _IMAGENET_STD + _IMAGENET_MEAN
     return np.clip(arr, 0, 1)
 
 # Plot a grid of images with class names
+
+
 def plot_image_grid_with_names(xb: torch.Tensor, labels: torch.Tensor, out_path: str,
                                title: str, cols: int = 8, denorm: bool = True):
+    """Save a labeled image grid using human-readable class names."""
     imgs = _to_numpy_for_display(xb, denorm=denorm)
     n = imgs.shape[0]
     cols = min(cols, n)
@@ -159,8 +196,11 @@ def plot_image_grid_with_names(xb: torch.Tensor, labels: torch.Tensor, out_path:
     plt.close()
 
 # Plot a grid of predictions with probabilities
+
+
 def plot_prediction_grid(xb: torch.Tensor, yb: torch.Tensor, probs: torch.Tensor, preds: torch.Tensor,
                          out_path: str, title: str = "Predictions", cols: int = 8):
+    """Save a grid showing true→pred labels and p(malignant) overlays."""
     imgs = _denorm_batch(xb)
     n = imgs.shape[0]
     cols = min(cols, n)
@@ -187,9 +227,12 @@ def plot_prediction_grid(xb: torch.Tensor, yb: torch.Tensor, probs: torch.Tensor
     plt.close()
 
 # 2D scatter plot of features (t-SNE or PCA)
+
+
 def plot_feature_scatter_2d(X: torch.Tensor, y: torch.Tensor, out_path: str,
                             title: str = "Feature scatter (t-SNE)",
                             max_points: int = 2000, method: str = "tsne"):
+    """Plot t-SNE/PCA embeddings scatter with class colors; stratified subsamples for speed."""
     Xn = X.detach().cpu().numpy()
     yn = y.detach().cpu().numpy()
 
@@ -224,7 +267,12 @@ def plot_feature_scatter_2d(X: torch.Tensor, y: torch.Tensor, out_path: str,
     plt.close()
 
 # Training function
+
+
 def train():
+    """Main training routine: prepare loaders, train Stage-1 with EMA + early stop, cache embeddings,
+    train Stage-2 classifier, evaluate on test, plot/save artifacts, and persist weights.
+    """
     set_seed(config.SEED)
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
@@ -418,7 +466,7 @@ def train():
             except Exception:
                 s1_tr_auc.append(0.5)
 
-        #  mid-epoch validation peek (few batches, EMA) 
+        #  mid-epoch validation peek (few batches, EMA)
         siam_eval = SiameseTriplet().to(device).to(memory_format=torch.channels_last)
         ema_siam.load_into(siam_eval)
         clf_eval = HeadBinaryClassifier().to(device)
@@ -568,7 +616,7 @@ def train():
     Xte, yte = cache_embeddings(siam, base_te, device, autocast_kwargs)
     print(f"[S2] cached: train={len(Xtr)} val={len(Xva)} test={len(Xte)}")
 
-    #  t-SNE scatter on TRAIN embeddings 
+    #  t-SNE scatter on TRAIN embeddings
     plot_feature_scatter_2d(Xtr, ytr, os.path.join(config.ARTIFACTS, "tsne_train_embeddings.png"),
                             title="Train embeddings (t-SNE)", max_points=2000)
 
@@ -691,7 +739,7 @@ def train():
     acc_t = (preds_t == yte.numpy()).mean()
     print(f"[TEST] acc@t* ({t:.3f}) = {acc_t:.3f}")
 
-    # prediction grid on first K original test images (eval tfm) 
+    # prediction grid on first K original test images (eval tfm)
     K = min(64, len(base_te.dataset))
     indices = random.sample(range(len(base_te.dataset)), k=K)
     subset = Subset(base_te.dataset, indices)

@@ -1,3 +1,9 @@
+"""
+Central configuration for the ISIC 2020 Siamese classifier project.
+Holds data paths, training hyperparameters, and logging toggles.
+Made by Aryan Somesh Gupta (s47414451)
+"""
+
 # Paths
 DRIVE_ROOT = "/content/drive/MyDrive/siamese_project/data"       # project data root
 # ISIC images directory

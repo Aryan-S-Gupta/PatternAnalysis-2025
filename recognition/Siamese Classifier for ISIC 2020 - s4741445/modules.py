@@ -1,3 +1,9 @@
+"""
+Model definitions for the ISIC 2020 classifier.
+Provides a ResNet50 embedder, a Siamese wrapper, and a small MLP head.
+Made by Aryan Somesh Gupta (s47414451)
+"""
+
 import torch
 import torch.nn as nn
 from torchvision.models import resnet50, ResNet50_Weights
@@ -5,7 +11,10 @@ import config
 
 
 class ResNet50Embedder(nn.Module):
-    # Extracts 2048-d features from ResNet50 and projects to 256-d embedding
+    """ResNet-50 backbone (ImageNet weights) with a 2048→256 projection head.
+    Forward returns an L2-normalized 256-D embedding.
+    """
+
     def __init__(self):
         super().__init__()
         m = resnet50(weights=ResNet50_Weights.IMAGENET1K_V1)
@@ -23,7 +32,10 @@ class ResNet50Embedder(nn.Module):
 
 
 class SiameseTriplet(nn.Module):
-    # Siamese model for triplet loss (anchor, positive, negative)
+    """Light Siamese wrapper exposing `forward_once(x)` to get embeddings.
+    Used for triplet/contrastive training and for embedding caching.
+    """
+
     def __init__(self):
         super().__init__()
         self.embed = ResNet50Embedder()
@@ -33,7 +45,10 @@ class SiameseTriplet(nn.Module):
 
 
 class HeadBinaryClassifier(nn.Module):
-    # Small MLP classifier on top of embeddings
+    """Shallow MLP classifier mapping embeddings to 2-class logits.
+    Supports dropout for regularization and is used in stage-2 training.
+    """
+
     def __init__(self, in_dim=256, num_classes=2):
         super().__init__()
         self.net = nn.Sequential(

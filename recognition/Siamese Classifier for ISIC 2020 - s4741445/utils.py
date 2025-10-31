@@ -1,3 +1,9 @@
+"""
+General utilities for the ISIC 2020 project.
+Plot helpers, seeding, simple metrics, and evaluation figures.
+Made by Aryan Somesh Gupta (s47414451)
+"""
+
 import os
 import random
 import torch
@@ -6,14 +12,20 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import confusion_matrix, RocCurveDisplay, roc_auc_score, ConfusionMatrixDisplay
 
 # set random seeds
+
+
 def set_seed(seed=42):
+    """Seed Python, NumPy, and Torch (CPU/GPU) for reproducibility."""
     random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
 
 # moving average for smoothing plots
+
+
 def moving_avg(x, k=3):
+    """Return a centered moving average of list/array `x` with window `k` (clamped to length)."""
     if k <= 1 or len(x) < 2:
         return x
     k = min(k, len(x))
@@ -21,7 +33,10 @@ def moving_avg(x, k=3):
     return np.convolve(np.array(x, dtype=float), w, mode="same").tolist()
 
 # plot training vs validation curves
+
+
 def plot_curves(train, val, title, out_dir, fname, smooth_k=1):
+    """Plot and save train vs val curves with optional smoothing; returns saved path."""
     os.makedirs(out_dir, exist_ok=True)
     t = moving_avg(train, smooth_k)
     v = moving_avg(val, smooth_k)
@@ -38,7 +53,10 @@ def plot_curves(train, val, title, out_dir, fname, smooth_k=1):
     return path
 
 # plot a single curve
+
+
 def plot_curve(series, title, out_dir, fname, smooth_k=1, ylabel="value"):
+    """Plot and save a single series with optional smoothing; returns saved path."""
     os.makedirs(out_dir, exist_ok=True)
     y = moving_avg(series, smooth_k)
     plt.figure()
@@ -53,8 +71,11 @@ def plot_curve(series, title, out_dir, fname, smooth_k=1, ylabel="value"):
     return path
 
 # compute accuracy
+
+
 @torch.no_grad()
 def accuracy(clf, X, y, device):
+    """Compute accuracy of classifier `clf` over batched tensors `(X, y)` on `device`."""
     clf.eval()
     correct = total = 0
     for i in range(0, len(X), 512):
@@ -66,7 +87,10 @@ def accuracy(clf, X, y, device):
     return correct / max(1, total)
 
 # confusion matrix plot
+
+
 def plot_confusion_matrix(y_true, y_pred, labels, out_path):
+    """Save a confusion matrix figure with label names to `out_path`."""
     if torch.is_tensor(y_true):
         y_true = y_true.detach().cpu().numpy()
     if torch.is_tensor(y_pred):
@@ -81,7 +105,10 @@ def plot_confusion_matrix(y_true, y_pred, labels, out_path):
     plt.close()
 
 # ROC curve plot
+
+
 def plot_roc_curve(y_true, y_score, out_path):
+    """Save ROC curve and include computed AUC in the legend."""
     if torch.is_tensor(y_true):
         y_true = y_true.detach().cpu().numpy()
     else:

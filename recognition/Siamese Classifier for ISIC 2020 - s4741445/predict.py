@@ -1,3 +1,9 @@
+"""
+Prediction and evaluation script for the ISIC 2020 pipeline.
+Loads trained weights, runs TTA, prints metrics, and saves ROC/CM plots.
+Made by Aryan Somesh Gupta (s47414451)
+"""
+
 import os
 import argparse
 import numpy as np
@@ -16,7 +22,10 @@ IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
 IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)
 
 # Set random seeds for reproducibility
+
+
 def set_seed(seed=42):
+    """Seed Python, NumPy, and Torch for reproducible inference."""
     import random
     random.seed(seed)
     np.random.seed(seed)
@@ -24,11 +33,18 @@ def set_seed(seed=42):
     torch.cuda.manual_seed_all(seed)
 
 # Ensure directory exists
-def ensure_dir(path): os.makedirs(path, exist_ok=True)
+
+
+def ensure_dir(path):
+    """Create the directory `path` if it does not exist (no-op otherwise)."""
+    os.makedirs(path, exist_ok=True)
 
 # Denormalize image tensor
+
+
 @torch.no_grad()
 def denorm(x):
+    """Undo ImageNet normalization on a BCHW/CHW tensor and clamp to [0,1]."""
     if x.ndim == 3:
         x = x.unsqueeze(0)
     x = x.clone().float().cpu()
@@ -36,7 +52,10 @@ def denorm(x):
     return x.clamp(0, 1).squeeze(0)
 
 # Generate TTA variants
+
+
 def tta_variants(x: torch.Tensor, n: int = 1):
+    """Generate up to {1,2,4,8} deterministic TTA variants (flip/transpose/rot90)."""
     outs = [x]
     if n >= 2:
         outs.append(torch.flip(x, [-1]))         # hflip
@@ -48,12 +67,20 @@ def tta_variants(x: torch.Tensor, n: int = 1):
     return outs[:n]
 
 # Load model state dict with error handling
+
+
 def try_load_state(model, path, strict=True):
+    """Load a state_dict from `path` into `model` with optional `strict` flag."""
     sd = torch.load(path, map_location="cpu")
     model.load_state_dict(sd, strict=strict)
 
 # Load Siamese and Classifier models with weights
+
+
 def load_models(device, siam_path="", clf_path=""):
+    """Instantiate Siamese + classifier on `device` and load weights.
+    Prefers explicit paths, then EMA/final fallbacks under `config.ARTIFACTS`.
+    """
     siam = SiameseTriplet().to(device)
     clf = HeadBinaryClassifier().to(device)
 
@@ -88,8 +115,11 @@ def load_models(device, siam_path="", clf_path=""):
     return siam, clf
 
 # Predict over a DataLoader with optional TTA
+
+
 @torch.no_grad()
 def predict_loader(siam, clf, loader: DataLoader, device, tta: int = 1):
+    """Run a full loader, optionally with TTA, returning `(probs, preds, labels)`."""
     probs_all, preds_all, labels_all = [], [], []
     for xb, yb in loader:
         xb = xb.to(device, non_blocking=True)
@@ -115,7 +145,10 @@ def predict_loader(siam, clf, loader: DataLoader, device, tta: int = 1):
     return P, H, Y
 
 # Confusion matrix plot
+
+
 def plot_confmat(y_true, y_pred, out_path, title="Confusion Matrix"):
+    """Save a labeled confusion matrix plot to `out_path`."""
     cm = confusion_matrix(y_true, y_pred)
     disp = ConfusionMatrixDisplay(cm, display_labels=["Benign", "Malignant"])
     fig, ax = plt.subplots()
@@ -126,7 +159,10 @@ def plot_confmat(y_true, y_pred, out_path, title="Confusion Matrix"):
     plt.close()
 
 # ROC curve plot
+
+
 def plot_roc(y_true, y_score, out_path, title="ROC (test)"):
+    """Save a ROC curve with AUC in the legend to `out_path`."""
     auc = roc_auc_score(y_true, y_score)
     fig, ax = plt.subplots()
     RocCurveDisplay.from_predictions(
@@ -137,7 +173,10 @@ def plot_roc(y_true, y_score, out_path, title="ROC (test)"):
     plt.close()
 
 # Compute metrics from predictions
+
+
 def metrics_from_preds(y_true, y_pred):
+    """Compute accuracy, balanced accuracy, sensitivity, and specificity."""
     cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
     tn, fp, fn, tp = cm.ravel()
     sens = tp / max(1, tp+fn)  # recall positive
@@ -147,7 +186,10 @@ def metrics_from_preds(y_true, y_pred):
     return acc, bal_acc, sens, spec
 
 # Choose threshold that balances accuracy and balanced accuracy
+
+
 def pick_threshold_compromise(y, p, steps=1001, min_sens=0.70):
+    """Grid-search a probability threshold that balances acc & bal-acc while enforcing a minimum sensitivity."""
     y = np.asarray(y)
     p = np.asarray(p)
     ts = np.linspace(0.0, 1.0, steps)
@@ -173,7 +215,10 @@ def pick_threshold_compromise(y, p, steps=1001, min_sens=0.70):
                               sens=float(sens[i]), spec=float(spec[i]))
 
 # Main prediction routine
+
+
 def main():
+    """CLI entrypoint: load data/models, tune threshold on val, evaluate on test, and write plots & summary."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--siamese", default="", type=str,
                         help="Path to Siamese weights")
@@ -189,13 +234,13 @@ def main():
 
     print("[PREDICT] started")
 
-    #  Data 
+    #  Data
     _, val_loader, test_loader, _ = make_loaders()
 
-    #  Models 
+    #  Models
     siam, clf = load_models(device, args.siamese, args.classifier)
 
-    #  VALIDATION: choose single compromise threshold 
+    #  VALIDATION: choose single compromise threshold
     print("[VALIDATION] started")
     v_probs, _, v_labels = predict_loader(
         siam, clf, val_loader, device, tta=args.tta)
@@ -208,7 +253,7 @@ def main():
           f"sens={stats['sens']:.3f} | spec={stats['spec']:.3f}")
     print("[VALIDATION] finished")
 
-    #  TEST with that same threshold 
+    #  TEST with that same threshold
     print("[TEST] started")
     t_probs, _, t_labels = predict_loader(
         siam, clf, test_loader, device, tta=args.tta)
@@ -216,7 +261,7 @@ def main():
     t_pred = (t_probs >= t_star).astype(int)
     acc, bal_acc, sens, spec = metrics_from_preds(t_labels, t_pred)
 
-    #  Concise final summary 
+    #  Concise final summary
     print("\n================= FINAL TEST RESULTS =================")
     print(f"Overall Accuracy      : {acc * 100:.2f}%")
     print(f"Area Under Curve (AUC): {test_auc:.3f}")
@@ -225,7 +270,7 @@ def main():
     print(f"Specificity (Recall−) : {spec * 100:.2f}%")
     print("======================================================\n")
 
-    #  Plots 
+    #  Plots
     cm_path = os.path.join(config.ARTIFACTS, "confusion_matrix_test.png")
     roc_path = os.path.join(config.ARTIFACTS, "roc_curve_test.png")
     plot_confmat(t_labels, t_pred, cm_path,

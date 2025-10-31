@@ -1,3 +1,9 @@
+"""
+Data loading utilities for ISIC 2020.
+Builds transforms, splits metadata, and constructs PyTorch datasets/loaders.
+Made by Aryan Somesh Gupta (s47414451)
+"""
+
 import os
 import time
 import glob
@@ -13,8 +19,12 @@ from typing import Optional, List, Dict
 from torch.utils.data import Dataset, DataLoader, BatchSampler
 
 # Build image transforms
+
+
 def _build_transforms(train: bool) -> v2.Compose:
-    # keep your original augmentation choices
+    """Create torchvision v2 transforms.
+    If `train` is True, include light augmentation; always resize, normalize to ImageNet stats. Returns a Compose pipeline.
+    """
     aug = [
         v2.RandomHorizontalFlip(),
         v2.RandomVerticalFlip(p=0.2),
@@ -38,12 +48,17 @@ def _build_transforms(train: bool) -> v2.Compose:
 # Only .jpg per your requirement
 _EXTS = (".jpg",)
 
+
 def _resolve_path(images_dir: str, stem: str) -> Optional[str]:
+    """Return the absolute path to `<stem>.jpg` if it exists in `images_dir`, else None."""
     p = os.path.join(images_dir, stem + ".jpg")
     return p if os.path.exists(p) else None
 
 # Read metadata CSV
+
+
 def _read_metadata(csv_path: str) -> pd.DataFrame:
+    """Read metadata CSV, normalize column names, keep `isic_id/target[/patient_id]`, and coerce types. Returns a cleaned DataFrame."""
     df = pd.read_csv(csv_path)
     if "isic_id" not in df.columns and "image_name" in df.columns:
         df = df.rename(columns={"image_name": "isic_id"})
@@ -56,7 +71,10 @@ def _read_metadata(csv_path: str) -> pd.DataFrame:
     return df
 
 # Split metadata into train/val/test
+
+
 def _stratified_split(df, val_frac, test_frac, seed):
+    """Stratified split by `target` into train/val/test using provided fractions and seed. Returns three DataFrames."""
     rng = random.Random(seed)
     parts = []
     for _, g in df.groupby("target"):
@@ -79,7 +97,12 @@ def _stratified_split(df, val_frac, test_frac, seed):
     return train.reset_index(drop=True), val.reset_index(drop=True), test.reset_index(drop=True)
 
 # Grouped split by a column (e.g., patient_id)
+
+
 def _grouped_split(df, group_col, val_frac, test_frac, seed):
+    """Grouped split that preserves patient grouping.
+    Splits unique values of `group_col` per class into train/val/test and reassembles rows. Returns three DataFrames.
+    """
     rng = random.Random(seed)
     parts = []
     for _, g in df.groupby("target"):
@@ -104,7 +127,12 @@ def _grouped_split(df, group_col, val_frac, test_frac, seed):
     return train.reset_index(drop=True), val.reset_index(drop=True), test.reset_index(drop=True)
 
 # Filter IDs by checking file existence on disk
+
+
 def _filter_ids_by_disk(images_dir: str, df: pd.DataFrame, max_workers: int = 32) -> pd.DataFrame:
+    """Keep only rows whose `isic_id.jpg` exists on disk.
+    Uses a thread pool for quick existence checks. Returns a filtered DataFrame and logs the keep ratio.
+    """
     ids = df["isic_id"].astype(str).tolist()
     t0 = time.time()
 
@@ -118,7 +146,11 @@ def _filter_ids_by_disk(images_dir: str, df: pd.DataFrame, max_workers: int = 32
     return kept
 
 # Dataset for single images
+
+
 class ISICSingle(Dataset):
+    """Single-image dataset returning `(tensor, label)` with evaluation-safe transforms."""
+
     def __init__(self, images_dir: str, table: pd.DataFrame, train: bool):
         self.dir = images_dir
         self.tfm = _build_transforms(train)
@@ -130,17 +162,24 @@ class ISICSingle(Dataset):
         self.paths = [p for p, _ in keep]
         self.labels = [y for _, y in keep]
 
-    def __len__(self): return len(self.paths)
+    def __len__(self):
+        """Number of available images."""
+        return len(self.paths)
 
     def __getitem__(self, idx: int):
+        """Load RGB image by index, apply transform, and return `(x, y)`."""
         img = Image.open(self.paths[idx]).convert("RGB")
         x = self.tfm(img)
         y = int(self.labels[idx])
         return x, torch.tensor(y, dtype=torch.long)
 
 # Dataset for triplet sampling
+
+
 class ISICTriplet(Dataset):
-    """Returns (anchor, positive, negative, label_of_anchor)."""
+    """Triplet dataset for metric learning.
+    Each item returns `(xa, xp, xn, ya)` where `xp` shares the class of `xa` and `xn` is from the other class.
+    """
 
     def __init__(self, images_dir: str, table: pd.DataFrame, train: bool):
         self.dir = images_dir
@@ -156,13 +195,17 @@ class ISICTriplet(Dataset):
             self.records.append((p, y))
         assert 0 in self.class_to_indices and 1 in self.class_to_indices, "need both classes"
 
-    def __len__(self): return len(self.records)
+    def __len__(self):
+        """Number of anchors available (same as internal record count)."""
+        return len(self.records)
 
     def _load(self, idx: int):
+        """Helper: load a single image+label and apply transform."""
         p, y = self.records[idx]
         return self.tfm(Image.open(p).convert("RGB")), y
 
     def __getitem__(self, idx: int):
+        """Sample a positive and a negative for the given anchor index and return the triplet tensors and anchor label."""
         xa, ya = self._load(idx)
         pos_pool = self.class_to_indices[ya]
         pos_idx = idx
@@ -176,8 +219,10 @@ class ISICTriplet(Dataset):
         return xa, xp, xn, torch.tensor(ya, dtype=torch.long)
 
 # Balanced batch sampler for triplet dataset
+
+
 class BalancedAnchorBatchSampler(BatchSampler):
-    """Balanced anchors per class; with-replacement; epoch size = len(self)."""
+    """Sampler that yields balanced anchor indices per class for triplet training."""
 
     def __init__(self, dataset: ISICTriplet, batch_size: int, seed: int = 42):
         self.dataset = dataset
@@ -192,6 +237,7 @@ class BalancedAnchorBatchSampler(BatchSampler):
             self.c1)) // max(1, min(self.k0, self.k1)))
 
     def __iter__(self):
+        """Yield a sequence of anchor index batches with ~50/50 class balance."""
         for _ in range(self.n_batches):
             b0 = (self.rng.sample(self.c0, self.k0) if len(self.c0) >= self.k0
                   else [self.rng.choice(self.c0) for _ in range(self.k0)])
@@ -201,10 +247,15 @@ class BalancedAnchorBatchSampler(BatchSampler):
             self.rng.shuffle(batch)
             yield batch
 
-    def __len__(self): return self.n_batches
+    def __len__(self):
+        """Number of batches per epoch derived from minority class size."""
+        return self.n_batches
 
 # DataLoader creation
+
+
 def _dl_kwargs():
+    """Build common DataLoader kwargs (workers, pin/prefetch) based on config."""
     numw = int(getattr(config, "NUM_WORKERS", 4))
     kw = dict(num_workers=numw, pin_memory=True)
     if numw > 0:
@@ -213,7 +264,12 @@ def _dl_kwargs():
     return kw
 
 # Create DataLoaders for single image dataset
+
+
 def make_loaders():
+    """Create train/val/test DataLoaders of single images.
+    Reads CSV, filters missing files, performs stratified/grouped split, and builds loaders with configured batch size.
+    """
     df = _read_metadata(config.META_CSV)
 
     # Fast, parallel, .jpg-only presence check (no glob crawl)
@@ -243,7 +299,10 @@ def make_loaders():
     return train_loader, val_loader, test_loader, (train_df, val_df, test_df)
 
 # Create DataLoaders for triplet dataset
+
+
 def make_triplet_loaders_from_splits(train_df, val_df):
+    """Create triplet DataLoaders (train/val) from given splits using a balanced anchor sampler."""
     train_tri = ISICTriplet(config.IMAGES_DIR, train_df, train=True)
     val_tri = ISICTriplet(config.IMAGES_DIR, val_df,   train=False)
 
